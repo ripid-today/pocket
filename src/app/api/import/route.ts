@@ -7,7 +7,7 @@ import {
   getBookByHash,
 } from "@/lib/db/books";
 import { hashBuffer } from "@/lib/hash";
-import { deleteObject, getObjectBuffer, headObject } from "@/lib/r2";
+import { deleteObject, getObjectBuffer } from "@/lib/r2";
 import { probeEpub } from "@/lib/probes/epub";
 import { probePdf } from "@/lib/probes/pdf";
 
@@ -38,19 +38,19 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
 
-  // Verify the object exists (C5).
-  const head = await headObject(r2Key);
-  if (!head) {
-    return NextResponse.json(
-      { error: "Uploaded file not found. Please try importing again." },
-      { status: 404 }
-    );
-  }
-
-  // Fetch + re-hash for authoritative dedup (C8: race / replay guard).
+  // Fetch + re-hash for authoritative dedup (C8) and existence check (C5) in
+  // one step. getObjectBuffer retries on transient R2 timeouts/consistency and
+  // returns null only on a genuine 404.
   let buffer: Buffer;
   try {
-    buffer = await getObjectBuffer(r2Key);
+    const b = await getObjectBuffer(r2Key);
+    if (!b) {
+      return NextResponse.json(
+        { error: "Uploaded file not found. Please try importing again." },
+        { status: 404 }
+      );
+    }
+    buffer = b;
   } catch {
     return NextResponse.json(
       { error: "Could not read the uploaded file." },

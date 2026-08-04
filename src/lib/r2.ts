@@ -97,26 +97,52 @@ export async function getObjectRange(
 // Fetch the full object into a Buffer. Used at import-finalize time to probe
 // metadata and re-hash for dedup. EPUBs are small; for very large PDFs this
 // holds the file in memory briefly during the one-time import probe.
-export async function getObjectBuffer(key: string): Promise<Buffer> {
-  const cmd = new GetObjectCommand({ Bucket: bucket(), Key: key });
-  const out = await client().send(cmd);
-  const stream = (out.Body as unknown as { transformToWebStream: () => ReadableStream<Uint8Array> }).transformToWebStream();
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.byteLength;
+//
+// Returns the buffer, or null if the object is genuinely absent (404). On
+// transient errors (timeout / slow first connection from Railway) it retries
+// a few times with backoff, because R2 can be eventual-consistent across
+// edges and a just-uploaded object may not be immediately HEAD/GET-visible.
+export async function getObjectBuffer(key: string): Promise<Buffer | null> {
+  const attempts = [1, 2, 3, 4];
+  for (const n of attempts) {
+    try {
+      const cmd = new GetObjectCommand({ Bucket: bucket(), Key: key });
+      const out = await client().send(cmd);
+      const stream = (out.Body as unknown as {
+        transformToWebStream: () => ReadableStream<Uint8Array>;
+      }).transformToWebStream();
+      const reader = stream.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.byteLength;
+      }
+      const merged = new Uint8Array(total);
+      let pos = 0;
+      for (const c of chunks) {
+        merged.set(c, pos);
+        pos += c.byteLength;
+      }
+      return Buffer.from(merged);
+    } catch (err) {
+      const isNotFound =
+        (err as any)?.name === "NotFound" ||
+        (err as any)?.$metadata?.httpStatusCode === 404;
+      if (isNotFound) {
+        return null; // genuine 404 — object truly absent
+      }
+      if (n < attempts.length) {
+        // Transient (timeout/consistency) — wait and retry with backoff.
+        await new Promise((r) => setTimeout(r, 500 * n));
+        continue;
+      }
+      throw err;
+    }
   }
-  const merged = new Uint8Array(total);
-  let pos = 0;
-  for (const c of chunks) {
-    merged.set(c, pos);
-    pos += c.byteLength;
-  }
-  return Buffer.from(merged);
+  return null;
 }
 
 // Idempotent delete — a missing object is not an error.
