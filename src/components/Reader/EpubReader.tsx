@@ -45,6 +45,13 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
 
         // Register the custom element (safe to call multiple times).
         const view = document.createElement("foliate-view") as any;
+        // foliate-view has no :host height rule of its own; its paginator uses
+        // height:100% which resolves to 0 unless the host has a definite height.
+        // Force block + full height so the paginator gets real dimensions and
+        // renders content instead of a blank viewport.
+        view.style.display = "block";
+        view.style.width = "100%";
+        view.style.height = "100%";
         viewRef.current = view;
         if (cancelled) return;
         container.appendChild(view);
@@ -120,7 +127,8 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
     return (
       <div
         ref={containerRef}
-        className="reader-content flex-1 w-full h-full bg-black"
+        className="bg-black"
+        style={{ position: "absolute", inset: 0 }}
       />
     );
   }

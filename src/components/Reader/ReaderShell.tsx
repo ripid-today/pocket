@@ -116,7 +116,7 @@ export default function ReaderShell({
     <div className="flex flex-col h-screen bg-black">
       <ReaderTopBar title={title} onSave={handleSaveSpot} onClose={handleClose} />
 
-      <div className="flex-1 overflow-hidden">
+      <div className="relative flex-1 overflow-hidden">
         {format === "epub" ? (
           <EpubReader
             ref={epubRef}
