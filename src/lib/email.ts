@@ -1,55 +1,62 @@
-import nodemailer from "nodemailer";
+// OTP email delivery via Resend's HTTP API.
+//
+// Why not Gmail SMTP: Railway blocks outbound SMTP (ports 25/465/587) on
+// Hobby/Standard plans as anti-spam, so nodemailer hangs indefinitely.
+// Resend uses a plain HTTPS POST (port 443), which Railway allows. Free
+// tier: 100 emails/day, 3000/month — plenty for a personal single-user OTP.
+//
+// Requires env: RESEND_API_KEY=re_...
+// Optional env: MAIL_FROM=Pocket <onboarding@resend.dev>  (sandbox sender,
+//   or your verified domain like Pocket <noreply@ripid.vn>)
 
-// Gmail SMTP over port 587 (STARTTLS) forced to IPv4 with explicit timeouts.
-// Railway's IPv6 egress to Gmail:465 was unreachable (ENETUNREACH); 587/IPv4
-// is the reliable path. Explicit timeouts ensure a fast failure (returning a
-// clear error to the user) instead of hanging the request if the connection
-// stalls — Railway can buffer a long-running request behind Cloudflare.
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false, // STARTTLS upgrades the connection
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-  // Force IPv4 — avoids ENETUNREACH on IPv6-only egress on Railway.
-  // `family` is a valid Node net.connect option passed through by nodemailer;
-  // cast because it isn't in the SMTP transport types.
-  ...( { family: 4 } as object ),
-  // Fail fast: cap each connection phase so a stalled SMTP connection
-  // surfaces an error within ~15s rather than hanging indefinitely.
-  connectionTimeout: 10_000, // 10s to establish the TCP connection
-  greetingTimeout: 10_000, // 10s to receive the SMTP greeting
-  socketTimeout: 15_000, // 15s of inactivity on the socket
-} as nodemailer.TransportOptions);
+const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
 export async function sendOtp(
   email: string,
   code: string
 ): Promise<{ success: boolean; error?: string }> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    return { success: false, error: "Email service is not configured." };
+  }
+
+  const from = process.env.MAIL_FROM || "Pocket <onboarding@resend.dev>";
+
   try {
-    await transporter.sendMail({
-      from: `"Pocket" <${process.env.GMAIL_USER}>`,
-      to: email,
-      subject: "Your Pocket login code",
-      html: `
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 400px; margin: 0 auto; padding: 40px 20px;">
-          <h1 style="color: #ffffff; font-size: 24px; margin-bottom: 8px; background:#000; padding:12px; border-radius:8px;">Pocket</h1>
-          <p style="color: #1A1A1A; font-size: 16px; line-height: 1.5;">
-            Use the code below to sign in to your Pocket account.
-          </p>
-          <div style="background: #FAF8F5; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
-            <span style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #1A1A1A; font-family: 'Courier New', monospace;">
-              ${code}
-            </span>
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: email,
+        subject: "Your Pocket login code",
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 400px; margin: 0 auto; padding: 40px 20px;">
+            <h1 style="color: #ffffff; font-size: 24px; margin-bottom: 8px; background:#000; padding:12px; border-radius:8px;">Pocket</h1>
+            <p style="color: #1A1A1A; font-size: 16px; line-height: 1.5;">
+              Use the code below to sign in to your Pocket account.
+            </p>
+            <div style="background: #FAF8F5; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+              <span style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #1A1A1A; font-family: 'Courier New', monospace;">
+                ${code}
+              </span>
+            </div>
+            <p style="color: #78716C; font-size: 14px; line-height: 1.5;">
+              This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.
+            </p>
           </div>
-          <p style="color: #78716C; font-size: 14px; line-height: 1.5;">
-            This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.
-          </p>
-        </div>
-      `,
+        `,
+      }),
     });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error("Resend API error:", res.status, text);
+      return { success: false, error: "Failed to send email. Please try again." };
+    }
 
     return { success: true };
   } catch (err) {
