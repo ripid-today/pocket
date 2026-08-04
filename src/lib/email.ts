@@ -1,12 +1,22 @@
 import nodemailer from "nodemailer";
 
+// Gmail SMTP over port 587 (STARTTLS) forced to IPv4. Railway's IPv6 egress
+// to Gmail on port 465 is unreliable (ENETUNREACH), so we pin the family
+// to 4 and use the STARTTLS port, which is the most reliable path on
+// container hosts.
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false, // STARTTLS upgrades the connection
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD,
   },
-});
+  // Force IPv4 — avoids ENETUNREACH on IPv6-only egress on Railway.
+  // `family` is a valid Node net.connect option passed through by nodemailer;
+  // cast because it isn't in the SMTP transport types.
+  ...( { family: 4 } as object ),
+} as nodemailer.TransportOptions);
 
 export async function sendOtp(
   email: string,

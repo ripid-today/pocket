@@ -1,6 +1,8 @@
+[build]
+builder = "dockerfile"
+
 [deploy]
-# Railway healthcheck + start. The Dockerfile EXPOSEs 3000 and starts
-# `node server.js`; Railway injects PORT if you prefer to use $PORT.
+# Railway injects PORT (often 8080). The Dockerfile reads $PORT at runtime.
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
