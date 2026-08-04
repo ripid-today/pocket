@@ -55,6 +55,17 @@ export async function sendOtp(
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       console.error("Resend API error:", res.status, text);
+      // Resend's sandbox sender (onboarding@resend.dev) only delivers to the
+      // email the account signed up with. A 403 validation_error means the
+      // recipient isn't that address — surface a clear message so the user
+      // knows which email to use, instead of a generic 500.
+      if (res.status === 403 && text.includes("own email address")) {
+        return {
+          success: false,
+          error:
+            "This email isn't allowed for the sandbox sender. Log in with the account you registered with Resend.",
+        };
+      }
       return { success: false, error: "Failed to send email. Please try again." };
     }
 

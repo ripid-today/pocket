@@ -33,7 +33,7 @@ export async function POST(request: Request) {
   if (!result.success) {
     return NextResponse.json(
       { error: result.error || "Failed to send OTP." },
-      { status: 500 }
+      { status: 400 }
     );
   }
 
