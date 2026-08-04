@@ -31,40 +31,48 @@ export default function ReaderShell({
   const [fontSize, setFontSize] = useState(prefs.fontSize);
   const [lineHeight, setLineHeight] = useState(prefs.lineHeight);
   const [bottomVisible, setBottomVisible] = useState(true);
-  const [invert] = useState(true); // PDF dark mode default on; toggle deferred (E6 acceptable for MVP)
+  const [invert] = useState(true); // PDF dark mode
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(
+    format === "pdf" ? pageCount || 1 : 1
+  );
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Persist typography changes (debounced) — F8, F9.
-  const persistPrefs = useCallback(
-    (fs: number, lh: number) => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
-        fetch("/api/preferences/font-size", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fontSize: fs }),
-        }).catch(() => {});
-        fetch("/api/preferences/line-height", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lineHeight: lh }),
-        }).catch(() => {});
-      }, 600);
-    },
-    []
-  );
+  const persistPrefs = useCallback((fs: number, lh: number) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      fetch("/api/preferences/font-size", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fontSize: fs }),
+      }).catch(() => {});
+      fetch("/api/preferences/line-height", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineHeight: lh }),
+      }).catch(() => {});
+    }, 600);
+  }, []);
 
+  // Libra-style delta handlers (bottom bar calls with ±2).
   const handleFontSize = useCallback(
-    (v: number) => {
-      setFontSize(v);
-      persistPrefs(v, lineHeight);
+    (delta: number) => {
+      setFontSize((prev) => {
+        const next = Math.min(32, Math.max(8, prev + delta));
+        persistPrefs(next, lineHeight);
+        return next;
+      });
     },
     [lineHeight, persistPrefs]
   );
   const handleLineHeight = useCallback(
-    (v: number) => {
-      setLineHeight(v);
-      persistPrefs(fontSize, v);
+    (delta: number) => {
+      setLineHeight((prev) => {
+        const next = Math.min(24, Math.max(4, prev + delta));
+        persistPrefs(fontSize, next);
+        return next;
+      });
     },
     [fontSize, persistPrefs]
   );
@@ -72,8 +80,24 @@ export default function ReaderShell({
   // Apply typography to the active renderer.
   useEffect(() => {
     if (format === "epub") epubRef.current?.setTypography(fontSize, lineHeight);
-    if (format === "pdf") pdfRef.current?.setZoom(1 + (fontSize - 18) / 18); // map font to zoom
+    if (format === "pdf") {
+      // Map font-size to PDF zoom (1 at default 18px).
+      pdfRef.current?.setZoom(1 + (fontSize - 18) / 18);
+    }
   }, [fontSize, lineHeight, format]);
+
+  // Track PDF total pages + current page from the reader handle. The PDF
+  // reader detects the real page count asynchronously once pdf.js loads, so
+  // poll to sync both totalPages and currentPage into the bottom bar.
+  useEffect(() => {
+    if (format !== "pdf") return;
+    const t = setInterval(() => {
+      const n = pdfRef.current?.getNumPages?.();
+      if (n && n !== totalPages) setTotalPages(n);
+      setCurrentPage(pdfRef.current?.getPage() ?? 1);
+    }, 500);
+    return () => clearInterval(t);
+  }, [format, totalPages]);
 
   // Auto-hide bottom bar on scroll down, show on scroll up (M19).
   useEffect(() => {
@@ -108,9 +132,7 @@ export default function ReaderShell({
     }
   }, [bookId, format]);
 
-  const handleClose = useCallback(() => {
-    router.push("/library");
-  }, [router]);
+  const handleClose = useCallback(() => router.push("/library"), [router]);
 
   return (
     <div className="flex flex-col h-screen bg-black">
@@ -139,8 +161,10 @@ export default function ReaderShell({
         format={format}
         fontSize={fontSize}
         lineHeight={lineHeight}
-        onFontSize={handleFontSize}
-        onLineHeight={handleLineHeight}
+        currentPage={currentPage}
+        totalPages={totalPages}
+        onFontSizeChange={handleFontSize}
+        onLineHeightChange={handleLineHeight}
       />
     </div>
   );

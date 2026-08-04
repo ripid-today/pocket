@@ -102,7 +102,14 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
     useImperativeHandle(
       ref,
       (): EpubReaderHandle => ({
-        getLocator: () => viewRef.current?.lastLocation ?? null,
+        // foliate's lastLocation is an object; the `cfi` field is the
+        // persistent, serializable location string we save as the bookmark.
+        // Returning the whole object previously produced "[object Object]".
+        getLocator: () => {
+          const loc = viewRef.current?.lastLocation;
+          if (!loc) return null;
+          return typeof loc.cfi === "string" ? loc.cfi : null;
+        },
         goTo: async (locator: string) => {
           const view = viewRef.current;
           if (!view) return;

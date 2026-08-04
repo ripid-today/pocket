@@ -97,8 +97,8 @@ export default function ImportDialog({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-neutral-900 border border-white/10 rounded-2xl shadow-lg p-6 w-full max-w-sm">
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-neutral-900 border border-white/10 rounded-2xl shadow-2xl p-6 w-full max-w-sm">
         <input
           ref={fileInputRef}
           type="file"
@@ -110,17 +110,22 @@ export default function ImportDialog({ onClose }: { onClose: () => void }) {
 
         {status === "idle" && (
           <div className="text-center">
-            <p className="text-white font-medium mb-1">Import a book</p>
-            <p className="text-sm text-white/50 mb-4">EPUB or PDF, up to 1 GB</p>
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/5 text-white/50 mb-4">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <h2 className="text-white font-semibold mb-1">Import a book</h2>
+            <p className="text-sm text-white/50 mb-5">EPUB or PDF, up to 1&nbsp;GB</p>
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="w-full px-4 py-3 bg-white text-black rounded-lg font-medium hover:bg-white/90 min-h-[44px]"
+              className="w-full h-11 bg-white text-black rounded-xl font-semibold hover:bg-white/90 active:bg-white/80 transition-colors"
             >
               Choose file
             </button>
             <button
               onClick={onClose}
-              className="mt-3 text-sm text-white/50 hover:text-white"
+              className="mt-3 text-sm text-white/50 hover:text-white h-11 px-4"
             >
               Cancel
             </button>
