@@ -20,6 +20,14 @@ function client(): S3Client {
   return new S3Client({
     region: "auto",
     endpoint: R2_ENDPOINT,
+    // Railway's first connection to R2 can be slow (cold TCP handshake / proxy
+    // egress). The SDK's default requestTimeout can throw TimeoutError on a
+    // short-lived connection, which we were treating as "not found". Use
+    // generous explicit timeouts so a slow-but-successful R2 call completes.
+    requestHandler: {
+      requestTimeout: 30_000,
+      connectionTimeout: 20_000,
+    } as never,
     credentials: {
       accessKeyId: process.env.R2_ACCESS_KEY_ID,
       secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
@@ -122,18 +130,35 @@ export async function deleteObject(key: string): Promise<void> {
 }
 
 // Verify an object exists and return its size + type (used at finalize time).
+// Retries on transient errors (timeout/slow first connection to R2 from
+// Railway) so a late-but-successful response isn't misread as "not found".
 export async function headObject(
   key: string
 ): Promise<{ contentLength: number; contentType: string } | null> {
-  try {
-    const out = await client().send(
-      new HeadObjectCommand({ Bucket: bucket(), Key: key })
-    );
-    return {
-      contentLength: parseInt(out.ContentLength?.toString() || "0", 10),
-      contentType: out.ContentType || "application/octet-stream",
-    };
-  } catch {
-    return null;
+  const attempts = [1, 2, 3];
+  for (const n of attempts) {
+    try {
+      const out = await client().send(
+        new HeadObjectCommand({ Bucket: bucket(), Key: key })
+      );
+      return {
+        contentLength: parseInt(out.ContentLength?.toString() || "0", 10),
+        contentType: out.ContentType || "application/octet-stream",
+      };
+    } catch (err) {
+      const isNotFound = (err as any)?.name === "NotFound" ||
+        (err as any)?.$metadata?.httpStatusCode === 404;
+      if (isNotFound) {
+        return null; // genuine 404 — object committed and absent
+      }
+      // Transient (timeout, connection error) — retry, don't misreport.
+      if (n < attempts.length) {
+        await new Promise((r) => setTimeout(r, 400 * n));
+        continue;
+      }
+      console.error("[r2] headObject failed after retries for", key, err);
+      return null;
+    }
   }
+  return null;
 }
