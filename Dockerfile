@@ -7,6 +7,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* ./
 RUN npm ci
 COPY . .
+# Ensure a public/ dir exists even if the project doesn't ship one, so the
+# runtime COPY below never fails on "not found".
+RUN mkdir -p public
 RUN npm run build
 
 # Runtime stage
@@ -19,7 +22,7 @@ ENV HOSTNAME=0.0.0.0
 
 RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
 
-COPY --from=build /app/public ./public
+COPY --from=build --chown=nextjs:nodejs /app/public ./public
 # next build (standalone) outputs a self-contained server in .next/standalone
 COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
