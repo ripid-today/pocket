@@ -57,7 +57,9 @@ export default function ImportDialog({ onClose }: { onClose: () => void }) {
               : reject(new Error(xhr.status === 403 ? "Upload URL expired. Try again." : "Upload failed."));
           xhr.onerror = () => reject(new Error("Network error during upload."));
           xhr.open("PUT", urlData.presignedUrl);
-          xhr.setRequestHeader("Content-Type", file.type || (urlData.format === "epub" ? "application/epub+zip" : "application/pdf"));
+          // Do NOT set Content-Type: the presigned URL is signed without it,
+          // so whatever the browser sends (or omits) is accepted by R2. Setting
+          // a mismatched header would cause a 403 SignatureDoesNotMatch.
           xhr.send(file);
         });
 

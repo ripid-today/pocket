@@ -45,16 +45,21 @@ export function r2KeyFor(userId: number, fileName: string): string {
 }
 
 // Presigned PUT URL the browser uploads the file to directly (bypasses any
-// server body limit). Content-Type is locked so the upload can't mismatch.
+// server body limit). Content-Type is intentionally NOT pinned in the signed
+// request: R2's signature check only covers the fields it was signed with, and
+// a browser may send a different/low-level Content-Type for an .epub than the
+// server requested, causing a 403 SignatureDoesNotMatch. Omit it so any
+// Content-Type (or none) is accepted; the object picks up its type from
+// headObject at finalize time.
 export async function presignPut(
   key: string,
   contentType: string,
   expiresIn = 600
 ): Promise<string> {
+  void contentType; // intentionally not part of the signature (see above)
   const cmd = new PutObjectCommand({
     Bucket: bucket(),
     Key: key,
-    ContentType: contentType,
   });
   return getSignedUrl(client(), cmd, { expiresIn });
 }
