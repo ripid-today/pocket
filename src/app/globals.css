@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-inter);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans, system-ui, sans-serif);
+  background-color: #000000;
+  color: #ffffff;
+}
+
+/* Reader dark theme: ensures foliate iframe content is white-on-black even
+   when the source EPUB declares its own colors. Ported from Libra. */
+.reader-dark {
+  background-color: #000000;
+  color: #ffffff;
+}
+
+/* EPUB source inline colors are stripped at probe time, but this is a safety
+   net for any element that still carries an inline color. */
+.reader-content [style*="color"] {
+  color: #ffffff !important;
+}
+.reader-content [style*="line-height"] {
+  line-height: inherit !important;
+}
+
+/* Range inputs: touch-friendly tap target. */
+input[type="range"] {
+  min-height: 44px;
+}
+
+/* Prevent iOS auto-zoom on input focus (16px minimum). */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+/* Respect notched-device safe areas for fixed bars. */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}

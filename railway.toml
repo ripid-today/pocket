@@ -1,0 +1,7 @@
+[deploy]
+# Railway healthcheck + start. The Dockerfile EXPOSEs 3000 and starts
+# `node server.js`; Railway injects PORT if you prefer to use $PORT.
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
