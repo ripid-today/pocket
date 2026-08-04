@@ -1,20 +1,16 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/apiAuth";
-import {
-  createBook,
-  extOf,
-  formatForExt,
-  getBookByHash,
-} from "@/lib/db/books";
-import { hashBuffer } from "@/lib/hash";
-import { deleteObject, getObjectBuffer } from "@/lib/r2";
-import { probeEpub } from "@/lib/probes/epub";
-import { probePdf } from "@/lib/probes/pdf";
+import { createBook, extOf, formatForExt, getBookByHash, type BookFormat } from "@/lib/db/books";
 
-// Body: { r2Key, contentHash, fileName, format }
-// Verifies the R2 object exists, re-hashes it server-side for dedup, probes
-// metadata, and inserts the books row. The raw file stays in R2 (native render
-// reads it back at read time via the range-proxy).
+// Body: { r2Key, contentHash, fileName, format, title? }
+//
+// Finalize inserts the book row WITHOUT reading the file back from R2.
+// Railway's egress to r2.cloudflarestorage.com is blocked, so the server
+// cannot fetch object bytes to probe/re-hash. Instead:
+//   - dedup uses the client-computed contentHash (SHA-256 of the file),
+//   - title is supplied by the client (filename-derived, per the chosen scope),
+//   - spine_json / page_count are left null (the reader derives everything
+//     from the file itself via foliate-js / pdf.js).
 export async function POST(request: Request) {
   const auth = await requireUser();
   if ("error" in auth) return auth.error;
@@ -22,13 +18,23 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => ({}));
   const r2Key = body?.r2Key?.toString() || "";
-  const clientHash = body?.contentHash?.toString() || "";
+  const contentHash = body?.contentHash?.toString() || "";
   const fileName = body?.fileName?.toString() || "";
-  const format = body?.format?.toString() as "epub" | "pdf" | undefined;
+  const format = body?.format?.toString() as BookFormat | undefined;
+  const title = body?.title?.toString().trim() || "";
 
-  if (!r2Key || !clientHash || !fileName || !format) {
+  if (!r2Key || !contentHash || !fileName || !format) {
     return NextResponse.json(
       { error: "r2Key, contentHash, fileName, and format are required." },
+      { status: 400 }
+    );
+  }
+
+  // Validate format against extension.
+  const ext = extOf(fileName);
+  if (formatForExt(ext) !== format) {
+    return NextResponse.json(
+      { error: "File format does not match its extension." },
       { status: 400 }
     );
   }
@@ -38,81 +44,35 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
 
-  // Fetch + re-hash for authoritative dedup (C8) and existence check (C5) in
-  // one step. getObjectBuffer retries on transient R2 timeouts/consistency and
-  // returns null only on a genuine 404.
-  let buffer: Buffer;
-  try {
-    const b = await getObjectBuffer(r2Key);
-    if (!b) {
-      return NextResponse.json(
-        { error: "Uploaded file not found. Please try importing again." },
-        { status: 404 }
-      );
-    }
-    buffer = b;
-  } catch {
-    return NextResponse.json(
-      { error: "Could not read the uploaded file." },
-      { status: 500 }
-    );
-  }
-
-  const serverHash = hashBuffer(buffer);
-  if (serverHash !== clientHash) {
-    // The client-computed hash must match what landed in R2.
-    await deleteObject(r2Key);
-    return NextResponse.json(
-      { error: "File content changed during upload. Please try again." },
-      { status: 400 }
-    );
-  }
-
-  const existing = await getBookByHash(userId, serverHash);
+  // Dedup by content hash (C8). No R2 read needed.
+  const existing = await getBookByHash(userId, contentHash);
   if (existing) {
-    // Duplicate — clean up the orphan object we just uploaded.
-    await deleteObject(r2Key);
     return NextResponse.json(
       { error: "This book is already in your library." },
       { status: 409 }
     );
   }
 
-  // Probe metadata by format.
-  let title: string;
-  let author: string | null = null;
-  let spineJson: string | null = null;
-  let pageCount: number | null = null;
-
-  try {
-    if (format === "epub") {
-      const probe = await probeEpub(buffer);
-      title = probe.title;
-      author = probe.author || null;
-      spineJson = JSON.stringify(probe.spine);
-    } else {
-      const probe = await probePdf(buffer, fileName);
-      title = probe.title;
-      author = probe.author || null;
-      pageCount = probe.pageCount;
-    }
-  } catch (err) {
-    await deleteObject(r2Key);
-    const msg = err instanceof Error ? err.message : "Could not parse this file.";
-    return NextResponse.json({ error: msg }, { status: 422 });
-  }
+  // Derive a display title from the filename if none supplied.
+  const displayTitle =
+    title ||
+    fileName
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[-_]/g, " ")
+      .trim() ||
+    "Untitled";
 
   const book = await createBook({
     userId,
-    title,
-    author,
+    title: displayTitle,
+    author: null,
     format,
-    contentHash: serverHash,
+    contentHash,
     fileName,
-    fileSize: buffer.length,
+    fileSize: Number(body?.fileSize) || 0,
     r2Key,
-    spineJson,
-    pageCount,
+    spineJson: null,
+    pageCount: null,
   });
 
   return NextResponse.json({ bookId: book.id });

@@ -3,12 +3,13 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
-  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-// Cloudflare R2 is fully S3-compatible. The bucket stays PRIVATE — no public
-// access. All reads go through authenticated Next.js routes that proxy R2.
+// Cloudflare R2 is fully S3-compatible. The bucket stays PRIVATE. Books are
+// uploaded browser->R2 via presigned PUT and read browser<-R2 via short-lived
+// presigned GET; the app server never proxies object bytes (Railway's egress
+// to r2.cloudflarestorage.com is blocked).
 const R2_ENDPOINT =
   process.env.R2_ENDPOINT ||
   `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
@@ -72,77 +73,14 @@ export async function presignPut(
   return getSignedUrl(client(), cmd, { expiresIn });
 }
 
-// Stream a byte range [start, end] (inclusive) from R2. Returns the readable
-// body plus the total object size (from Content-Range) so the proxy can set
-// response headers.
-export async function getObjectRange(
-  key: string,
-  start: number,
-  end: number
-): Promise<{ body: ReadableStream<Uint8Array>; total: number; contentLength: number }> {
-  const cmd = new GetObjectCommand({
-    Bucket: bucket(),
-    Key: key,
-    Range: `bytes=${start}-${end}`,
-  });
-  const out = await client().send(cmd);
-  const rangeHeader = out.ContentRange || ""; // e.g. "bytes 0-65535/1234567"
-  const total = parseInt(rangeHeader.split("/")[1] || "0", 10);
-  const contentLength = parseInt(out.ContentLength?.toString() || "0", 10);
-  // AWS SDK v3 returns a SdkStream that can be converted to a web ReadableStream.
-  const body = (out.Body as unknown as { transformToWebStream: () => ReadableStream<Uint8Array> }).transformToWebStream();
-  return { body, total, contentLength };
-}
-
-// Fetch the full object into a Buffer. Used at import-finalize time to probe
-// metadata and re-hash for dedup. EPUBs are small; for very large PDFs this
-// holds the file in memory briefly during the one-time import probe.
-//
-// Returns the buffer, or null if the object is genuinely absent (404). On
-// transient errors (timeout / slow first connection from Railway) it retries
-// a few times with backoff, because R2 can be eventual-consistent across
-// edges and a just-uploaded object may not be immediately HEAD/GET-visible.
-export async function getObjectBuffer(key: string): Promise<Buffer | null> {
-  const attempts = [1, 2, 3, 4];
-  for (const n of attempts) {
-    try {
-      const cmd = new GetObjectCommand({ Bucket: bucket(), Key: key });
-      const out = await client().send(cmd);
-      const stream = (out.Body as unknown as {
-        transformToWebStream: () => ReadableStream<Uint8Array>;
-      }).transformToWebStream();
-      const reader = stream.getReader();
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        total += value.byteLength;
-      }
-      const merged = new Uint8Array(total);
-      let pos = 0;
-      for (const c of chunks) {
-        merged.set(c, pos);
-        pos += c.byteLength;
-      }
-      return Buffer.from(merged);
-    } catch (err) {
-      const isNotFound =
-        (err as any)?.name === "NotFound" ||
-        (err as any)?.$metadata?.httpStatusCode === 404;
-      if (isNotFound) {
-        return null; // genuine 404 — object truly absent
-      }
-      if (n < attempts.length) {
-        // Transient (timeout/consistency) — wait and retry with backoff.
-        await new Promise((r) => setTimeout(r, 500 * n));
-        continue;
-      }
-      throw err;
-    }
-  }
-  return null;
+// Presigned GET URL so the browser can fetch a book's bytes DIRECTLY from R2,
+// bypassing the app server. Railway's egress to r2.cloudflarestorage.com is
+// blocked/failing, so the server cannot proxy book bytes. GET URLs are issued
+// short-lived (default 120s) so a leaked URL is useless almost immediately;
+// the bucket itself stays private.
+export async function presignGet(key: string, expiresIn = 120): Promise<string> {
+  const cmd = new GetObjectCommand({ Bucket: bucket(), Key: key });
+  return getSignedUrl(client(), cmd, { expiresIn });
 }
 
 // Idempotent delete — a missing object is not an error.
@@ -155,36 +93,3 @@ export async function deleteObject(key: string): Promise<void> {
   }
 }
 
-// Verify an object exists and return its size + type (used at finalize time).
-// Retries on transient errors (timeout/slow first connection to R2 from
-// Railway) so a late-but-successful response isn't misread as "not found".
-export async function headObject(
-  key: string
-): Promise<{ contentLength: number; contentType: string } | null> {
-  const attempts = [1, 2, 3];
-  for (const n of attempts) {
-    try {
-      const out = await client().send(
-        new HeadObjectCommand({ Bucket: bucket(), Key: key })
-      );
-      return {
-        contentLength: parseInt(out.ContentLength?.toString() || "0", 10),
-        contentType: out.ContentType || "application/octet-stream",
-      };
-    } catch (err) {
-      const isNotFound = (err as any)?.name === "NotFound" ||
-        (err as any)?.$metadata?.httpStatusCode === 404;
-      if (isNotFound) {
-        return null; // genuine 404 — object committed and absent
-      }
-      // Transient (timeout, connection error) — retry, don't misreport.
-      if (n < attempts.length) {
-        await new Promise((r) => setTimeout(r, 400 * n));
-        continue;
-      }
-      console.error("[r2] headObject failed after retries for", key, err);
-      return null;
-    }
-  }
-  return null;
-}

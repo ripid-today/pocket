@@ -49,14 +49,21 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
         if (cancelled) return;
         container.appendChild(view);
 
-        // Fetch the EPUB via the authenticated range-proxy, build a File.
-        const res = await fetch(`/api/book/${bookId}`);
-        if (!res.ok) {
-          console.error("[epub] fetch failed", res.status);
+        // Get a presigned GET URL from the authenticated route, then fetch the
+        // book's bytes DIRECTLY from R2 (Railway can't proxy them).
+        const metaRes = await fetch(`/api/book/${bookId}`);
+        if (!metaRes.ok) {
+          console.error("[epub] /api/book fetch failed", metaRes.status);
           return;
         }
-        const blob = await res.blob();
-        const file = new File([blob], "book.epub", {
+        const meta = await metaRes.json();
+        const r2Res = await fetch(meta.url);
+        if (!r2Res.ok) {
+          console.error("[epub] R2 fetch failed", r2Res.status);
+          return;
+        }
+        const blob = await r2Res.blob();
+        const file = new File([blob], meta.fileName || "book.epub", {
           type: "application/epub+zip",
         });
 

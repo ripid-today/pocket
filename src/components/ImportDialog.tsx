@@ -73,6 +73,7 @@ export default function ImportDialog({ onClose }: { onClose: () => void }) {
             contentHash,
             fileName: file.name,
             format: urlData.format,
+            fileSize: file.size,
           }),
         });
         const impData = await impRes.json();

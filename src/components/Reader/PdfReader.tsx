@@ -38,13 +38,17 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
       const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
       pdfjs.GlobalWorkerOptions.workerSrc = WORKER_SRC;
 
-      const res = await fetch(`/api/book/${bookId}`);
-      if (!res.ok) return;
-      const data = new Uint8Array(await res.arrayBuffer());
-      // pdf.js supports HTTP range requests natively, but since our proxy
-      // returns 206 ranges, we can also pass the document URL directly:
-      //   const task = pdfjs.getDocument({ url: `/api/book/${bookId}` });
-      // Buffering here keeps it simple and works for any size on desktop.
+      // Get a presigned GET URL, then load the PDF bytes DIRECTLY from R2
+      // (Railway can't proxy them).
+      const metaRes = await fetch(`/api/book/${bookId}`);
+      if (!metaRes.ok) return;
+      const meta = await metaRes.json();
+      const r2Res = await fetch(meta.url);
+      if (!r2Res.ok) return;
+      const data = new Uint8Array(await r2Res.arrayBuffer());
+      // pdf.js can also load directly from the presigned URL (HTTP range
+      // requests) for large PDFs; buffering here is simplest and works for any
+      // size on desktop/mobile with typical memory.
       const task = pdfjs.getDocument({ data });
       const pdf = await task.promise;
       if (cancelled) return;
