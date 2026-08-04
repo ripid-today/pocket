@@ -1,9 +1,10 @@
 import nodemailer from "nodemailer";
 
-// Gmail SMTP over port 587 (STARTTLS) forced to IPv4. Railway's IPv6 egress
-// to Gmail on port 465 is unreliable (ENETUNREACH), so we pin the family
-// to 4 and use the STARTTLS port, which is the most reliable path on
-// container hosts.
+// Gmail SMTP over port 587 (STARTTLS) forced to IPv4 with explicit timeouts.
+// Railway's IPv6 egress to Gmail:465 was unreachable (ENETUNREACH); 587/IPv4
+// is the reliable path. Explicit timeouts ensure a fast failure (returning a
+// clear error to the user) instead of hanging the request if the connection
+// stalls — Railway can buffer a long-running request behind Cloudflare.
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 587,
@@ -16,6 +17,11 @@ const transporter = nodemailer.createTransport({
   // `family` is a valid Node net.connect option passed through by nodemailer;
   // cast because it isn't in the SMTP transport types.
   ...( { family: 4 } as object ),
+  // Fail fast: cap each connection phase so a stalled SMTP connection
+  // surfaces an error within ~15s rather than hanging indefinitely.
+  connectionTimeout: 10_000, // 10s to establish the TCP connection
+  greetingTimeout: 10_000, // 10s to receive the SMTP greeting
+  socketTimeout: 15_000, // 15s of inactivity on the socket
 } as nodemailer.TransportOptions);
 
 export async function sendOtp(
