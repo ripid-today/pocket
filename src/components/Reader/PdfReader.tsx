@@ -58,6 +58,9 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
   const modeRef = useRef<PdfReaderMode>(initialMode);
   const pageElsRef = useRef<HTMLDivElement[]>([]);
   const renderedRef = useRef<Set<number>>(new Set());
+  // Last zoom that rasters were actually drawn at; used to compute the zoom
+  // ratio when preserving the reader's scroll position on a zoom change.
+  const lastRenderZoomRef = useRef(zoomRef.current);
   const [zoom, setZoomState] = useState(zoomRef.current);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(initialPage || 1);
@@ -290,7 +293,14 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     style.filter = invert ? "invert(1) hue-rotate(180deg)" : "none";
     ctx.scale(dpr, dpr);
     await page.render({ canvasContext: ctx, viewport }).promise;
-    el.appendChild(canvas);
+    // Double-buffer: only swap the new canvas in after it has finished
+    // rendering, so the previous canvas stays visible while the page is being
+    // repainted at the new scale. This prevents the "blank black flash" when
+    // the reader re-renders after a zoom/text-size change (image-heavy pages
+    // render slowly, so clearing the old canvas first would leave a blank).
+    const existing = el.querySelector("canvas");
+    if (existing) el.replaceChild(canvas, existing);
+    else el.appendChild(canvas);
     renderNear();
   };
 
@@ -307,16 +317,27 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     });
   };
 
-  // Re-render when zoom or invert changes (clear + relayout canvases).
+  // Re-render when zoom or invert changes. We preserve the reader's position
+  // by scaling scrollTop by the zoom ratio (the whole raster document scales
+  // uniformly) instead of clearing every page and losing the user's place.
+  // Rendered pages are re-rendered lazily and double-buffered (see renderPage),
+  // so there is no blank flash and the scrollbar stays usable throughout.
   useEffect(() => {
     const scroll = scrollRef.current;
     const pdf = pdfDocRef.current;
     if (!scroll || !pdf || modeRef.current === "reflow") return;
-    pageElsRef.current.forEach((el) => (el.innerHTML = ""));
+
+    const ratio =
+      lastRenderZoomRef.current > 0 ? zoom / lastRenderZoomRef.current : 1;
+    lastRenderZoomRef.current = zoom;
+    // Preserve the relative reading position (the page near the viewport
+    // top stays roughly at the same place).
+    scroll.scrollTop = scroll.scrollTop * ratio;
+
+    // Mark rendered pages stale so renderNear repaints them at the new scale;
+    // re-rendering is lazy (near-viewport only) and double-buffered.
     renderedRef.current = new Set();
-    const prevTop = scroll.scrollTop;
     requestAnimationFrame(() => renderNear());
-    scroll.scrollTop = prevTop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom, invert]);
 
