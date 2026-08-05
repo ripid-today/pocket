@@ -1,11 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useImperativeHandle, forwardRef, useState } from "react";
+import {
+  itemsFromTextContent,
+  buildReflowBlocks,
+  type ReflowBlock,
+} from "@/lib/pdfReflow";
 
 // pdf.js is browser-only. Import dynamically so SSR/build doesn't try to run it.
 // The worker is loaded from a CDN matched to the installed pdfjs-dist version.
 const PDFJS_VERSION = "4.10.38";
 const WORKER_SRC = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.min.mjs`;
+
+export type PdfReaderMode = "native" | "reflow";
 
 export interface PdfReaderHandle {
   // The currently visible (topmost) page number.
@@ -14,9 +21,13 @@ export interface PdfReaderHandle {
   getScrollPct: () => number;
   // Jump to a page + document scroll fraction (bookmark restore).
   goTo: (page: number, scrollPct: number) => Promise<void>;
-  // Scale every page uniformly (maps to the text-size control).
+  // Scale every page uniformly (native/render mode).
   setZoom: (scale: number) => void;
-  // Total number of pages.
+  // Apply font-size + line-height to reflowed text (reflow mode).
+  setTypography: (fontSize: number, lineHeight: number) => void;
+  // Switch between the raster "native" view and reflowed-text view.
+  setMode: (mode: PdfReaderMode) => void;
+  // Total number of source PDF pages.
   getNumPages: () => number;
 }
 
@@ -25,25 +36,49 @@ interface PdfReaderProps {
   initialPage?: number;
   initialScrollPct?: number;
   invert: boolean;
+  initialMode?: PdfReaderMode;
+  initialFontSize?: number;
+  onModeChange?: (mode: PdfReaderMode) => void;
 }
 
 // Continuous vertical scroll of ALL pages, rendered as stacked canvases.
-// Lazy: only renders pages near the viewport to avoid huge memory spikes on
-// multi-hundred-page PDFs; scrolling reveals the rest progressively.
+// Native mode lazily renders pages near the viewport. Reflow mode instead
+// reconstructs readable, flowable text (font-size + line-height adjustable)
+// since native PDF is fixed-layout and cannot reflow.
 const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader(
-  { bookId, initialPage, initialScrollPct, invert },
+  { bookId, initialPage, initialScrollPct, invert, initialMode = "native", initialFontSize = 18, onModeChange },
   ref
 ) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pdfDocRef = useRef<any>(null);
   const numPagesRef = useRef(0);
-  const zoomRef = useRef(1);
+  const zoomRef = useRef(1 + (initialFontSize - 18) / 18);
+  const fontSizeRef = useRef(initialFontSize);
+  const lineHeightRef = useRef(8);
+  const modeRef = useRef<PdfReaderMode>(initialMode);
   const pageElsRef = useRef<HTMLDivElement[]>([]);
   const renderedRef = useRef<Set<number>>(new Set());
-  const [zoom, setZoomState] = useState(1);
+  const [zoom, setZoomState] = useState(zoomRef.current);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(initialPage || 1);
   const initialRestoreDone = useRef(false);
+  // Reflow content bookkeeping.
+  const [typography, setTypographyState] = useState({
+    fontSize: initialFontSize,
+    lineHeight: 8,
+  });
+  const modeChangeRef = useRef(onModeChange);
+  useEffect(() => {
+    modeChangeRef.current = onModeChange;
+  }, [onModeChange]);
+
+  // React to an external mode switch (e.g. the bottom-bar toggle in
+  // ReaderShell). `setMode` fires onModeChange with the same value on the
+  // round-trip, so this settles without looping.
+  useEffect(() => {
+    if (initialMode !== modeRef.current) setMode(initialMode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialMode]);
 
   // Load the PDF document once + render pages to fill the viewport.
   useEffect(() => {
@@ -65,36 +100,29 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
       numPagesRef.current = pdf.numPages;
       setNumPages(pdf.numPages);
 
-      // Build page containers (one per page) so scrollbar height is correct
-      // even before rendering.
       const scroll = scrollRef.current;
       if (!scroll) return;
       scroll.innerHTML = "";
-      pageElsRef.current = [];
-      const frag = document.createDocumentFragment();
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const el = document.createElement("div");
-        el.style.cssText =
-          "display:flex;justify-content:center;padding:0 4px 16px;";
-        el.setAttribute("data-page", String(i));
-        frag.appendChild(el);
-        pageElsRef.current.push(el);
-      }
-      scroll.appendChild(frag);
-      renderedRef.current = new Set();
 
-      // Restore to bookmarked page if provided.
+      if (modeRef.current === "reflow") {
+        await buildReflowDocument(pdf, scroll);
+      } else {
+        buildNativePages(pdf, scroll);
+      }
+
+      // Restore to bookmarked position.
       if (!initialRestoreDone.current) {
         initialRestoreDone.current = true;
         if (initialPage && initialPage > 1) {
           await jumpTo(initialPage);
         } else if (initialScrollPct) {
-          const el = pageElsRef.current[0];
-          if (el) scroll.scrollTop = (el.scrollHeight) * initialScrollPct;
+          scroll.scrollTop = scroll.scrollHeight * initialScrollPct;
         }
       }
 
-      renderNear();
+      if (modeRef.current === "reflow") renderNearReflow();
+      else renderNear();
+      applyTypographyToReflow();
     })();
     return () => {
       cancelled = true;
@@ -103,7 +131,105 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
 
-  // Render pages within (and near) the viewport, lazily.
+  // ---- Native mode: build empty page containers ----
+  const buildNativePages = (pdf: any, scroll: HTMLDivElement) => {
+    scroll.innerHTML = "";
+    pageElsRef.current = [];
+    const frag = document.createDocumentFragment();
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const el = document.createElement("div");
+      el.style.cssText = "display:flex;justify-content:center;padding:0 4px 16px;";
+      el.setAttribute("data-page", String(i));
+      frag.appendChild(el);
+      pageElsRef.current.push(el);
+    }
+    scroll.appendChild(frag);
+    renderedRef.current = new Set();
+  };
+
+  // ---- Reflow mode: build reflowable text document ----
+  const buildReflowDocument = async (pdf: any, scroll: HTMLDivElement) => {
+    scroll.innerHTML = "";
+    pageElsRef.current = [];
+    renderedRef.current = new Set();
+
+    const wrapper = document.createElement("div");
+    wrapper.id = "reflow-content";
+    wrapper.style.cssText = "max-width:720px;margin:0 auto;padding:24px 20px 48px;";
+    scroll.appendChild(wrapper);
+
+    // Extract text for all pages. Do it in modest chunks so the UI stays
+    // responsive; each page of text is rebuilt into flowable blocks.
+    const total = pdf.numPages;
+    const CHUNK = 30;
+    for (let start = 0; start < total; start += CHUNK) {
+      if (!pdfDocRef.current) return;
+      const end = Math.min(total, start + CHUNK);
+      // Concurrently get text for this chunk.
+      const pagesText = await Promise.all(
+        Array.from({ length: end - start }, (_, k) =>
+          pdf.getPage(start + k + 1).then((p: any) => p.getTextContent())
+        )
+      );
+      if (!pdfDocRef.current) return;
+      for (let k = 0; k < pagesText.length; k++) {
+        const blocks = buildReflowBlocks(itemsFromTextContent(pagesText[k]));
+        appendPageBlocks(wrapper, blocks, start + k + 1);
+      }
+      // yield to keep tab responsive
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  };
+
+  const blockToTitle = (b: ReflowBlock) =>
+    b.type === "h1" ? "h1" : b.type === "h2" ? "h2" : "p";
+
+  const appendPageBlocks = (
+    wrapper: HTMLElement,
+    blocks: ReflowBlock[],
+    pageNum: number
+  ) => {
+    if (blocks.length === 0) return;
+    const section = document.createElement("section");
+    section.className = "reflow-page";
+    section.dataset.reflowPage = String(pageNum);
+    for (const b of blocks) {
+      const el = document.createElement(blockToTitle(b));
+      el.textContent = b.text;
+      el.style.fontSize = "inherit";
+      el.style.margin = b.type === "h1" ? "1.6em 0 0.4em" : b.type === "h2" ? "1.2em 0 0.4em" : "0 0 0.3em";
+      section.appendChild(el);
+    }
+    wrapper.appendChild(section);
+  };
+
+  // Apply font-size + line-height CSS to the reflow document.
+  const applyTypographyToReflow = () => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const wrapper = scroll.querySelector("#reflow-content") as HTMLElement | null;
+    if (!wrapper) return;
+    wrapper.style.cssText =
+      "max-width:720px;margin:0 auto;padding:24px 20px 48px;" +
+      `font-size:${fontSizeRef.current}px;line-height:${lineHeightRef.current};`;
+  };
+
+  // Reflow current pseudo-page from scroll.
+  const updateReflowPage = () => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const vh = scroll.clientHeight || 1;
+    const totalPseudo = Math.max(1, Math.round(scroll.scrollHeight / vh));
+    const current = Math.min(totalPseudo, Math.max(1, Math.floor(scroll.scrollTop / vh) + 1));
+    // Update footer via total pages = max(source pages, pseudo pages count)
+    setNumPages(Math.max(numPagesRef.current, totalPseudo));
+    setCurrentPage(current);
+  };
+
+  // placeholder pass-through for reflow rendering when scrolling (no raster).
+  const renderNearReflow = () => updateReflowPage();
+
+  // ---- Native mode: render pages near viewport (lazy) ----
   const renderNear = async () => {
     const scroll = scrollRef.current;
     const pdf = pdfDocRef.current;
@@ -115,21 +241,19 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     for (let i = 0; i < pageElsRef.current.length; i++) {
       const el = pageElsRef.current[i];
       const pageNum = i + 1;
-      // Render if visible or within ~600px buffer.
       const et = el.offsetTop;
       const eb = et + el.offsetHeight;
       if (et <= bottom + 600 && eb >= top - 600) {
         if (!renderedRef.current.has(pageNum)) {
           renderedRef.current.add(pageNum);
           renderPage(pdf, pageNum, el).catch(() => {
-            renderedRef.current.delete(pageNum); // allow retry
+            renderedRef.current.delete(pageNum);
           });
         }
       }
     }
   };
 
-  // Update the tracked current page from scroll position.
   const updateCurrentPage = () => {
     const scroll = scrollRef.current;
     if (!scroll) return;
@@ -143,7 +267,10 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     setCurrentPage(page);
   };
 
-  // Render one page into its canvas element.
+  // Render one page into its canvas element. NOTE: the displayed width is
+  // scaled by zoom so that "font size Aa" genuinely enlarges the page on
+  // screen (before this fix, zoom only changed internal canvas resolution
+  // while the CSS width stayed pinned at 100%/720px, so text never grew).
   const renderPage = async (pdf: any, pageNum: number, el: HTMLDivElement) => {
     const page = await pdf.getPage(pageNum);
     const viewport = page.getViewport({ scale: zoomRef.current });
@@ -153,17 +280,17 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     const dpr = window.devicePixelRatio || 1;
     canvas.width = viewport.width * dpr;
     canvas.height = viewport.height * dpr;
-    // Page width fills the readable column; cap width on wide screens.
+    // Displayed width now follows zoom (native "text size"):
+    //   base width is 720px at zoom 1 (fontSize 18); scales linearly after.
+    const displayW = Math.round(720 * zoomRef.current);
     const style = canvas.style;
-    style.width = "100%";
-    style.maxWidth = "720px";
-    style.height = "auto";
+    style.width = `${displayW}px`;
+    style.height = `${Math.round(viewport.height * (displayW / viewport.width))}px`;
     style.aspectRatio = `${viewport.width} / ${viewport.height}`;
     style.filter = invert ? "invert(1) hue-rotate(180deg)" : "none";
     ctx.scale(dpr, dpr);
     await page.render({ canvasContext: ctx, viewport }).promise;
     el.appendChild(canvas);
-    // Re-measure after adding the canvas so lazy rendering extends scroll.
     renderNear();
   };
 
@@ -171,7 +298,6 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     const scroll = scrollRef.current;
     if (!scroll) return;
     await renderNear();
-    // Wait a tick for layout, then scroll the target page to top.
     await new Promise((r) => requestAnimationFrame(() => r(0)));
     requestAnimationFrame(() => {
       const target =
@@ -185,29 +311,65 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
   useEffect(() => {
     const scroll = scrollRef.current;
     const pdf = pdfDocRef.current;
-    if (!scroll || !pdf) return;
-    // Rebuild all page canvases at the new scale.
+    if (!scroll || !pdf || modeRef.current === "reflow") return;
     pageElsRef.current.forEach((el) => (el.innerHTML = ""));
     renderedRef.current = new Set();
     const prevTop = scroll.scrollTop;
     requestAnimationFrame(() => renderNear());
-    // Keep scroll anchored roughly.
     scroll.scrollTop = prevTop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom, invert]);
 
-  // Scroll listener: lazy-render + track current page + not-top scroll.
+  // Rebuild reflow text when typography changes.
+  useEffect(() => {
+    if (modeRef.current !== "reflow") return;
+    applyTypographyToReflow();
+    // Recompute pseudo-pages on next frame after layout.
+    requestAnimationFrame(() => updateReflowPage());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typography]);
+
+  // Scroll listener: lazy-render + track current page + bottom-bar sync.
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
     const onScroll = () => {
-      renderNear();
-      updateCurrentPage();
+      if (modeRef.current === "reflow") renderNearReflow();
+      else {
+        renderNear();
+        updateCurrentPage();
+      }
     };
     scroll.addEventListener("scroll", onScroll, { passive: true });
     return () => scroll.removeEventListener("scroll", onScroll);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Toggle mode (native <-> reflow). Rebuilds the scroll content.
+  const setMode = (mode: PdfReaderMode) => {
+    const scroll = scrollRef.current;
+    const pdf = pdfDocRef.current;
+    if (!scroll || !pdf || mode === modeRef.current) {
+      modeRef.current = mode;
+      if (modeRef.current === "reflow") applyTypographyToReflow();
+      return;
+    }
+    modeRef.current = mode;
+    const prevPct = scroll.scrollHeight > 0 ? scroll.scrollTop / scroll.scrollHeight : 0;
+    scroll.innerHTML = "";
+    if (mode === "reflow") {
+      buildReflowDocument(pdf, scroll).then(() => {
+        applyTypographyToReflow();
+        scroll.scrollTop = scroll.scrollHeight * prevPct;
+        renderNearReflow();
+      });
+    } else {
+      buildNativePages(pdf, scroll);
+      scroll.scrollTop = scroll.scrollHeight * prevPct;
+      renderNear();
+    }
+    setCurrentPage(1);
+  };
 
   useImperativeHandle(
     ref,
@@ -223,6 +385,11 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
       goTo: async (page: number, scrollPct: number) => {
         const pdf = pdfDocRef.current;
         if (!pdf) return;
+        if (modeRef.current === "reflow") {
+          const scroll = scrollRef.current;
+          if (scroll) scroll.scrollTop = scroll.scrollHeight * scrollPct;
+          return;
+        }
         if (page > 1) {
           await jumpTo(Math.min(page, pdf.numPages));
         } else {
@@ -235,8 +402,15 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
       },
       setZoom: (scale: number) => {
         zoomRef.current = scale;
-        setZoomState(scale);
+        if (modeRef.current !== "reflow") setZoomState(scale);
       },
+      setTypography: (fontSize: number, lineHeight: number) => {
+        fontSizeRef.current = fontSize;
+        lineHeightRef.current = lineHeight;
+        setTypographyState({ fontSize, lineHeight });
+        if (modeRef.current === "reflow") applyTypographyToReflow();
+      },
+      setMode,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [currentPage]
@@ -246,6 +420,7 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     <div
       ref={scrollRef}
       className="w-full h-full overflow-y-auto overflow-x-hidden bg-black"
+      data-reader-mode={modeRef.current}
     />
   );
 });

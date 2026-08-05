@@ -22,22 +22,36 @@ export interface EpubReaderHandle {
   goTo: (locator: string) => Promise<void>;
   // Apply font-size (px) and line-height. foliate accepts a CSS string.
   setTypography: (fontSize: number, lineHeight: number) => void;
+  // Turn the page forward / backward (handles cross-section transitions).
+  next: () => Promise<void>;
+  prev: () => Promise<void>;
 }
 
 interface EpubReaderProps {
   bookId: number;
   initialLocator?: string | null;
+  // Called whenever foliate relocates with the current reading progress so the
+  // bottom bar can show a real "X / Y" instead of the hardcoded 1 / 1.
+  onProgress?: (current: number, total: number) => void;
 }
 
 const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
-  function EpubReader({ bookId, initialLocator }, ref) {
+  function EpubReader({ bookId, initialLocator, onProgress }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<any>(null);
+    // Non-reactive ref so the relocate handler always reads the latest prop.
+    const onProgressRef = useRef(onProgress);
+    useEffect(() => {
+      onProgressRef.current = onProgress;
+    }, [onProgress]);
 
     useEffect(() => {
       let cancelled = false;
       const container = containerRef.current;
       if (!container) return;
+
+      let progressTimer: ReturnType<typeof setInterval> | null = null;
+      let onKeyDown: ((e: KeyboardEvent) => void) | null = null;
 
       (async () => {
         // foliate-js is browser-only (custom elements, DOM). Import dynamically.
@@ -85,10 +99,67 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
         if (view.renderer?.setStyles) {
           view.renderer.setStyles(DARK_CSS);
         }
+
+        // --- Navigation wiring (fixes "only first page readable") -----------
+        // foliate paginator renders all content as hidden multi-column layout
+        // and only reveals one viewport at a time. Without an explicit way to
+        // call prev()/next() the reader is stuck on page 1. We expose
+        // next/prev on the handle and also bind keyboard + click/tap zones.
+
+        // Keyboard navigation (ignore when user is typing / focused on a button).
+        onKeyDown = (e: KeyboardEvent) => {
+          const t = e.target as HTMLElement | null;
+          if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+          switch (e.key) {
+            case "ArrowRight":
+            case "PageDown":
+              e.preventDefault();
+              view.next();
+              break;
+            case "ArrowLeft":
+            case "PageUp":
+              e.preventDefault();
+              view.prev();
+              break;
+            case " ":
+            case "ArrowDown":
+              e.preventDefault();
+              view.next();
+              break;
+            case "ArrowUp":
+              e.preventDefault();
+              view.prev();
+              break;
+          }
+        };
+        window.addEventListener("keydown", onKeyDown);
+
+        // Sync page counter into the parent (foliate relocate -> location).
+        const syncProgress = () => {
+          const loc = view?.lastLocation;
+          const tot = loc?.location?.total;
+          const cur = loc?.location?.current;
+          if (typeof cur === "number") onProgressRef.current?.(cur + 1, tot || 0);
+        };
+        // Listen to foliate's relocate events (fires on every page turn).
+        view.addEventListener("relocate", syncProgress);
+        // Warm initial sync + keep in sync while fonts settle.
+        syncProgress();
+        progressTimer = setInterval(() => {
+          if (!viewRef.current) return;
+          const l = viewRef.current.lastLocation;
+          if (l) {
+            const cur = l.location?.current;
+            const tot = l.location?.total;
+            onProgressRef.current?.(typeof cur === "number" ? cur + 1 : 1, tot || 0);
+          }
+        }, 500);
       })();
 
       return () => {
         cancelled = true;
+        if (progressTimer) clearInterval(progressTimer);
+        if (onKeyDown) window.removeEventListener("keydown", onKeyDown);
         try {
           viewRef.current?.close?.();
         } catch {
@@ -127,16 +198,52 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
             ` html, body { font-size: ${fontSize}px !important; line-height: ${lineHeight} !important; }`;
           view.renderer.setStyles(css);
         },
+        next: async () => {
+          const view = viewRef.current;
+          if (!view) return;
+          try {
+            await view.next();
+          } catch {
+            /* ignore */
+          }
+        },
+        prev: async () => {
+          const view = viewRef.current;
+          if (!view) return;
+          try {
+            await view.prev();
+          } catch {
+            /* ignore */
+          }
+        },
       }),
       []
     );
 
     return (
-      <div
-        ref={containerRef}
-        className="bg-black"
-        style={{ position: "absolute", inset: 0 }}
-      />
+      <>
+        <div
+          ref={containerRef}
+          className="bg-black cursor-default select-text"
+          style={{ position: "absolute", inset: 0 }}
+        />
+        {/* Edge tap zones: scroll the book forward/backward when the reader
+            content (an iframe) swallows pointer events. These sit ABOVE the
+            foliate view but only cover slim left/right strips so the middle of
+            the page stays selectable by the reader. */}
+        <button
+          aria-label="Previous page"
+          onClick={() => viewRef.current?.prev?.()}
+          className="absolute left-0 top-0 bottom-0 cursor-pointer"
+          style={{ zIndex: 5, width: "14%", touchAction: "manipulation" }}
+        />
+        <button
+          aria-label="Next page"
+          onClick={() => viewRef.current?.next?.()}
+          className="absolute right-0 top-0 bottom-0 cursor-pointer"
+          style={{ zIndex: 5, width: "14%", touchAction: "manipulation" }}
+        />
+      </>
     );
   }
 );

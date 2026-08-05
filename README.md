@@ -24,3 +24,16 @@ npm run dev
 2. Create a Railway service from the repo (auto-detects Dockerfile).
 3. Set all env vars from `.env.example` in Railway.
 4. Point your domain's CNAME at the Railway service's `up.railway.app` host.
+
+## Reader features
+- **EPUB**: tap either edge (or use ←/→, ↑/↓, PgUp/PgDn, Space) to turn pages;
+  the bottom bar shows the real reading position (e.g. `147 / 471`).
+- **PDF — Native layout (default)**: preserves all tables, equations, and
+  diagrams. The **Aa** control zooms the page so text genuinely grows/shrinks
+  on screen. Line-spacing is unavailable here because PDF is fixed-layout (a
+  page is a raster image—there is no line-height to change).
+- **PDF — Reflow mode** (bottom-bar `Reflow` toggle): reconstructs the text as
+  flowable paragraphs (via pdf.js `getTextContent`) so both the **Aa** font-size
+  and the **↕** line-spacing controls work. Trade-off: tables, equations, and
+  diagrams are not preserved—use Native layout to see them.
+- Bookmarks store which mode (native/reflow) a PDF was last read in and restore it.

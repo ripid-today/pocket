@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import EpubReader, { type EpubReaderHandle } from "./EpubReader";
-import PdfReader, { type PdfReaderHandle } from "./PdfReader";
+import PdfReader, { type PdfReaderHandle, type PdfReaderMode } from "./PdfReader";
 import ReaderTopBar from "./ReaderTopBar";
 import ReaderBottomBar from "./ReaderBottomBar";
 
@@ -32,10 +32,24 @@ export default function ReaderShell({
   const [lineHeight, setLineHeight] = useState(prefs.lineHeight);
   const [bottomVisible, setBottomVisible] = useState(true);
   const [invert] = useState(true); // PDF dark mode
+  // PDF reader view mode: native (raster, preserves layout) or reflow (text reflow).
+  const [pdfMode, setPdfMode] = useState<PdfReaderMode>(
+    parsePdfMode(bookmark?.locator) ?? "native"
+  );
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(
     format === "pdf" ? pageCount || 1 : 1
   );
+
+  // EPUB: foliate reports real reading progress asynchronously (location-based).
+  // Reflect it into the bottom bar so it's not stuck at "1 / 1" (M-fix).
+  const [epubCurrent, setEpubCurrent] = useState(1);
+  const [epubTotal, setEpubTotal] = useState(0);
+  // Reset the epub progress markers when switching books.
+  useEffect(() => {
+    setEpubCurrent(1);
+    setEpubTotal(0);
+  }, [bookId]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Persist typography changes (debounced) — F8, F9.
@@ -81,10 +95,14 @@ export default function ReaderShell({
   useEffect(() => {
     if (format === "epub") epubRef.current?.setTypography(fontSize, lineHeight);
     if (format === "pdf") {
-      // Map font-size to PDF zoom (1 at default 18px).
-      pdfRef.current?.setZoom(1 + (fontSize - 18) / 18);
+      if (pdfMode === "reflow") {
+        pdfRef.current?.setTypography(fontSize, lineHeight);
+      } else {
+        // Map font-size to PDF zoom (1 at default 18px).
+        pdfRef.current?.setZoom(1 + (fontSize - 18) / 18);
+      }
     }
-  }, [fontSize, lineHeight, format]);
+  }, [fontSize, lineHeight, format, pdfMode]);
 
   // Track PDF total pages + current page from the reader handle. The PDF
   // reader detects the real page count asynchronously once pdf.js loads, so
@@ -98,6 +116,15 @@ export default function ReaderShell({
     }, 500);
     return () => clearInterval(t);
   }, [format, totalPages]);
+
+  // EPUB: total pages come from foliate's relocate event (location-based
+  // count). currentPage is the epub offset + 1 (location.current is 0-based).
+  useEffect(() => {
+    if (format !== "epub") return;
+    if (epubTotal > 0) setTotalPages(epubTotal);
+    if (epubCurrent > 0) setCurrentPage(epubCurrent);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [epubCurrent, epubTotal, format]);
 
   // Auto-hide bottom bar on scroll down, show on scroll up (M19).
   useEffect(() => {
@@ -119,7 +146,11 @@ export default function ReaderShell({
     } else {
       const page = pdfRef.current?.getPage() ?? 1;
       const scrollPct = pdfRef.current?.getScrollPct() ?? 0;
-      locator = JSON.stringify({ page, scrollPct });
+      locator = JSON.stringify({
+        page,
+        scrollPct,
+        mode: pdfMode === "reflow" ? "reflow" : undefined,
+      });
     }
     try {
       await fetch("/api/bookmark", {
@@ -130,7 +161,7 @@ export default function ReaderShell({
     } catch {
       // best-effort; minimal handling
     }
-  }, [bookId, format]);
+  }, [bookId, format, pdfMode]);
 
   const handleClose = useCallback(() => router.push("/library"), [router]);
 
@@ -144,6 +175,10 @@ export default function ReaderShell({
             ref={epubRef}
             bookId={bookId}
             initialLocator={bookmark?.locator ?? null}
+            onProgress={(cur, tot) => {
+              setEpubCurrent(cur);
+              setEpubTotal(tot);
+            }}
           />
         ) : (
           <PdfReader
@@ -151,7 +186,10 @@ export default function ReaderShell({
             bookId={bookId}
             initialPage={parsePdfPage(bookmark?.locator)}
             initialScrollPct={parsePdfScrollPct(bookmark?.locator)}
+            initialMode={pdfMode}
+            initialFontSize={fontSize}
             invert={invert}
+            onModeChange={(m) => setPdfMode(m)}
           />
         )}
       </div>
@@ -159,15 +197,29 @@ export default function ReaderShell({
       <ReaderBottomBar
         visible={bottomVisible}
         format={format}
+        pdfMode={pdfMode}
         fontSize={fontSize}
         lineHeight={lineHeight}
         currentPage={currentPage}
         totalPages={totalPages}
         onFontSizeChange={handleFontSize}
         onLineHeightChange={handleLineHeight}
+        onTogglePdfMode={() =>
+          setPdfMode((m) => (m === "reflow" ? "native" : "reflow"))
+        }
       />
     </div>
   );
+}
+
+function parsePdfMode(locator?: string | null): PdfReaderMode | undefined {
+  if (!locator) return undefined;
+  try {
+    const p = JSON.parse(locator);
+    return p.mode === "reflow" ? "reflow" : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function parsePdfPage(locator?: string | null): number | undefined {
