@@ -3,16 +3,13 @@
 interface ReaderBottomBarProps {
   visible: boolean;
   format: "epub" | "pdf";
-  // PDF reader view mode (reflow text vs native raster).
-  pdfMode?: "native" | "reflow";
   fontSize: number;
   lineHeight: number;
-  currentPage: number;
-  totalPages: number;
+  // Reading progress as a 0–100 percentage (consistent across all books).
+  percent: number;
   // Libra-style delta handlers: the bar computes +/- and calls with the delta.
   onFontSizeChange: (delta: number) => void;
   onLineHeightChange: (delta: number) => void;
-  onTogglePdfMode?: () => void;
 }
 
 const FONT_MIN = 8;
@@ -40,22 +37,19 @@ function PlusIcon() {
 export default function ReaderBottomBar({
   visible,
   format,
-  pdfMode = "native",
   fontSize,
   lineHeight,
-  currentPage,
-  totalPages,
+  percent,
   onFontSizeChange,
   onLineHeightChange,
-  onTogglePdfMode,
 }: ReaderBottomBarProps) {
   const canDecFont = fontSize - STEP >= FONT_MIN;
   const canIncFont = fontSize + STEP <= FONT_MAX;
   const canDecLine = lineHeight - STEP >= LINE_MIN;
   const canIncLine = lineHeight + STEP <= LINE_MAX;
-  // Line-spacing is meaningful when text can reflow: EPUB always, PDF only in
-  // reflow mode (native PDF is fixed-layout).
-  const showsLineHeight = format === "epub" || pdfMode === "reflow";
+  // Line-spacing is only meaningful for reflowable EPUB text. PDF is native
+  // fixed layout (preserves charts/equations), so it exposes no line-height.
+  const showsLineHeight = format === "epub";
 
   return (
     <div
@@ -65,9 +59,9 @@ export default function ReaderBottomBar({
     >
       <div className="bg-black/85 backdrop-blur-md border-t border-white/10 px-2 sm:px-4 py-2.5">
         <div className="max-w-3xl mx-auto flex items-center justify-center gap-3 sm:gap-8">
-          {/* Page counter (Libra-style) */}
+          {/* Progress percentage (consistent across books, screens, zoom) */}
           <span className="text-xs text-white/60 tabular-nums whitespace-nowrap">
-            {currentPage} / {totalPages}
+            {percent}%
           </span>
 
           {/* Text size */}
@@ -99,7 +93,7 @@ export default function ReaderBottomBar({
           {/* Divider */}
           <div className="w-px h-6 bg-white/15 hidden xs:block" />
 
-          {/* Line spacing (reflowable text: EPUB always; PDF reflow mode) */}
+          {/* Line spacing (reflowable EPUB text only) */}
           {showsLineHeight && (
             <div className="flex items-center gap-1.5 sm:gap-2">
               <span className="text-xs text-white/50 hidden sm:inline" aria-hidden>
@@ -125,41 +119,6 @@ export default function ReaderBottomBar({
                 <PlusIcon />
               </button>
             </div>
-          )}
-
-          {/* PDF view-mode toggle: reflow text vs native layout */}
-          {format === "pdf" && onTogglePdfMode && (
-            <button
-              onClick={onTogglePdfMode}
-              aria-label={
-                pdfMode === "reflow"
-                  ? "Switch to native layout"
-                  : "Switch to reflowed text"
-              }
-              title={
-                pdfMode === "reflow"
-                  ? "Native layout (keeps charts/equations)"
-                  : "Reflow text: adjustable text size & line spacing"
-              }
-              className="flex items-center gap-1.5 px-3 h-10 rounded-lg text-xs text-white/80 hover:text-white hover:bg-white/10 border border-white/15 transition-colors touch-manipulation"
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 6h16M4 12h16M4 18h16"
-                />
-              </svg>
-              <span className="hidden sm:inline">
-                {pdfMode === "reflow" ? "Layout" : "Reflow"}
-              </span>
-            </button>
           )}
         </div>
       </div>

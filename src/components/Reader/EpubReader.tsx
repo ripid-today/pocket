@@ -113,20 +113,28 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
       };
     }, [bookId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Report progress based on scroll position. One "page" = one viewport
-    // height of content over the whole flow; the total mirrors the section
-    // count scaled to lookups so the counter moves as you scroll.
+    // Report progress based on scroll position as a 0–100 percentage (with
+    // total = 100) so reading progress is consistent across books, chapters,
+    // screens, and zoom levels — independent of how many text vs image pages
+    // a book has. The reader / bottom bar formats it as e.g. "34%".
     const reportProgress = () => {
       const container = containerRef.current;
-      const whole = bookRef.current;
-      if (!container || !whole) return;
+      if (!container) return;
       const max = container.scrollHeight - container.clientHeight;
-      if (max <= 0) return;
-      const pct = container.scrollTop / max;
-      const page = Math.max(1, Math.round(pct * whole.sectionCount * 4));
-      if (page !== lastPageReportRef.current) {
-        lastPageReportRef.current = page;
-        onProgressRef.current?.(page, whole.sectionCount * 4);
+      if (max <= 0) {
+        // Not scrollable (e.g. a one-screen book): you're at 100%.
+        if (lastPageReportRef.current !== 100) {
+          lastPageReportRef.current = 100;
+          onProgressRef.current?.(100, 100);
+        }
+        return;
+      }
+      const pct = Math.round(
+        Math.min(1, Math.max(0, container.scrollTop / max)) * 100
+      );
+      if (pct !== lastPageReportRef.current) {
+        lastPageReportRef.current = pct;
+        onProgressRef.current?.(pct, 100);
       }
     };
 
