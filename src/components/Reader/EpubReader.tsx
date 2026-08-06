@@ -91,6 +91,13 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
         const book = await makeBook(file);
         if (cancelled) return;
         await view.open(book);
+        // Continuous scroll: put the paginator into "scrolled" flow so the
+        // EPUB reads as one long scrollable page (libra-style) instead of
+        // fixed column pages. This makes the book natively swipeable/scrollable
+        // on a phone — the reader no longer requires tapping edge zones to turn
+        // pages, and the scroll position is reconciled to `relocate` so the
+        // bottom-bar counter keeps advancing. CFI bookmarks still work.
+        view.renderer?.setAttribute?.("flow", "scrolled");
         await view.init({
           lastLocation: initialLocator || undefined,
         });
@@ -221,29 +228,11 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
     );
 
     return (
-      <>
-        <div
-          ref={containerRef}
-          className="bg-black cursor-default select-text"
-          style={{ position: "absolute", inset: 0 }}
-        />
-        {/* Edge tap zones: scroll the book forward/backward when the reader
-            content (an iframe) swallows pointer events. These sit ABOVE the
-            foliate view but only cover slim left/right strips so the middle of
-            the page stays selectable by the reader. */}
-        <button
-          aria-label="Previous page"
-          onClick={() => viewRef.current?.prev?.()}
-          className="absolute left-0 top-0 bottom-0 cursor-pointer"
-          style={{ zIndex: 5, width: "14%", touchAction: "manipulation" }}
-        />
-        <button
-          aria-label="Next page"
-          onClick={() => viewRef.current?.next?.()}
-          className="absolute right-0 top-0 bottom-0 cursor-pointer"
-          style={{ zIndex: 5, width: "14%", touchAction: "manipulation" }}
-        />
-      </>
+      <div
+        ref={containerRef}
+        className="bg-black cursor-default select-text"
+        style={{ position: "absolute", inset: 0 }}
+      />
     );
   }
 );

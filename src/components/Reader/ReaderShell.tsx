@@ -166,7 +166,12 @@ export default function ReaderShell({
   const handleClose = useCallback(() => router.push("/library"), [router]);
 
   return (
-    <div className="flex flex-col h-screen bg-black">
+    // Use dynamic viewport height so the reader fills exactly the visible
+    // phone area. On mobile browsers 100vh includes the off-screen URL/toolbar
+    // height, which pushes the scroll container below the fold and makes it
+    // look like the book can't be scrolled. 100dvh tracks the real visible
+    // viewport; h-screen is kept as the fallback for older browsers.
+    <div className="flex flex-col h-screen max-h-screen h-[100dvh] max-h-[100dvh] w-full overflow-hidden bg-black">
       <ReaderTopBar title={title} onSave={handleSaveSpot} onClose={handleClose} />
 
       <div className="relative flex-1 overflow-hidden">

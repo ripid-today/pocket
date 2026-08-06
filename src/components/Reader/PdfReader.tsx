@@ -283,9 +283,14 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
     const dpr = window.devicePixelRatio || 1;
     canvas.width = viewport.width * dpr;
     canvas.height = viewport.height * dpr;
-    // Displayed width now follows zoom (native "text size"):
-    //   base width is 720px at zoom 1 (fontSize 18); scales linearly after.
-    const displayW = Math.round(720 * zoomRef.current);
+    // Displayed width follows zoom (native "text size"): base width is 720px
+    // at zoom 1 (fontSize 18), scaling linearly after. On narrow/mobile
+    // screens the page is capped to the scroll container's width so pages fit
+    // on screen and later pages are actually readable when scrolled to.
+    const container = scrollRef.current;
+    const maxW = container?.clientWidth || Infinity;
+    let displayW = Math.round(720 * zoomRef.current);
+    if (maxW < displayW) displayW = Math.max(280, maxW);
     const style = canvas.style;
     style.width = `${displayW}px`;
     style.height = `${Math.round(viewport.height * (displayW / viewport.width))}px`;
