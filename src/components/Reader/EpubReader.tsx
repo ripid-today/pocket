@@ -55,6 +55,7 @@ export function parseEpubLocator(
 const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
   function EpubReader({ bookId, initialLocator, onProgress }, ref) {
     const containerRef = useRef<HTMLDivElement>(null); // scroll container
+    const contentRef = useRef<HTMLDivElement>(null); // centered prose wrapper
     const bookRef = useRef<WholeBookHtml | null>(null);
     const onProgressRef = useRef(onProgress);
     const [fontSize, setFontSize] = useState(18);
@@ -237,12 +238,13 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
     // Copy HTML into the container after it is prepared (keeps layout cheap),
     // then restore the saved reading position the moment the DOM is mounted.
     useEffect(() => {
-      const container = containerRef.current;
-      if (!container || !html) return;
-      container.innerHTML = html;
+      const content = contentRef.current;
+      if (!content || !html) return;
+      content.innerHTML = html;
       const loc = parseEpubLocator(initialLocator);
-      if (loc) {
-        const secEl = container.querySelector(`#sec-${loc.sec}`);
+      const container = containerRef.current;
+      if (loc && container) {
+        const secEl = content.querySelector(`#sec-${loc.sec}`);
         if (secEl) {
           restoreTo(container, loc.sec, loc.pct);
         } else if (loc.sec === 0) {
@@ -254,11 +256,7 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
     return (
       <div
         ref={containerRef}
-        className="epub-flow bg-black text-white select-text overflow-y-auto w-full h-full px-4 sm:px-8 py-6 sm:py-10"
-        style={{
-          fontSize: `${fontSize}px`,
-          lineHeight: `${lineHeight}`,
-        }}
+        className="relative flex-1 overflow-y-auto w-full h-full bg-black"
         data-whole-epub
       >
         {loading && !html && (
@@ -271,6 +269,14 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
             Failed to open the book: {error}
           </div>
         )}
+        <div
+          ref={contentRef}
+          className="epub-flow select-text mx-auto max-w-2xl px-6 pt-20 pb-32"
+          style={{
+            fontSize: `${fontSize}px`,
+            lineHeight: `${fontSize + lineHeight}px`,
+          }}
+        />
       </div>
     );
   },
