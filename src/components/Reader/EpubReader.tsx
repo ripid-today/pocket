@@ -1,240 +1,279 @@
 "use client";
 
-import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
-
-// Dark theme CSS injected into foliate's renderer iframes so source colors
-// never override the white-on-black reading surface.
-const DARK_CSS = `
-  html, body { background: #000 !important; color: #fff !important; }
-  a { color: #6cb6ff !important; }
-  img { filter: invert(1) hue-rotate(180deg); }
-  svg { filter: invert(1) hue-rotate(180deg); }
-  /* strip any inline color/background declarations from source */
-  [style*="color"] { color: #fff !important; }
-  [style*="background"] { background: transparent !important; }
-  [style*="line-height"] { line-height: inherit !important; }
-`;
+import {
+  useEffect,
+  useRef,
+  useImperativeHandle,
+  forwardRef,
+  useState,
+} from "react";
+import { buildWholeBookHtml, type WholeBookHtml } from "@/lib/epubWhole";
 
 export interface EpubReaderHandle {
-  // Returns the current CFI locator string (foliate's lastLocation), or null.
+  // Returns the current save-spot locator (a JSON string with section + %
+  // scroll within it), mirroring the PDF reader's scroll-based bookmark.
   getLocator: () => string | null;
-  // Navigate to a previously saved CFI locator.
+  // Restore a previously saved locator (scroll to the saved position).
   goTo: (locator: string) => Promise<void>;
-  // Apply font-size (px) and line-height. foliate accepts a CSS string.
+  // Apply font-size (px) and line-height (unitless) to the whole-book flow.
   setTypography: (fontSize: number, lineHeight: number) => void;
-  // Turn the page forward / backward (handles cross-section transitions).
-  next: () => Promise<void>;
-  prev: () => Promise<void>;
+  // Scroll forward / backward by one viewport height.
+  next: () => void;
+  prev: () => void;
+  // Ordered TOC entries: { label, target: "#sec-i--frag" | "#sec-i" }.
+  getToc: () => { label: string; target: string }[];
+  // Scroll to an in-document anchor target (used by a potential TOC overlay).
+  goToAnchor: (target: string) => void;
 }
 
 interface EpubReaderProps {
   bookId: number;
   initialLocator?: string | null;
-  // Called whenever foliate relocates with the current reading progress so the
-  // bottom bar can show a real "X / Y" instead of the hardcoded 1 / 1.
+  // Called whenever the current page changes so the bottom bar can show a real
+  // "X / Y" instead of a hardcoded 1 / 1.
   onProgress?: (current: number, total: number) => void;
+  // The whole EPUB is built as one continuous flow; we still report a
+  // page-equivalent count based on scroll position.
+}
+
+export function parseEpubLocator(
+  locator?: string | null,
+): { sec: number; pct: number } | null {
+  if (!locator) return null;
+  try {
+    const p = JSON.parse(locator);
+    if (typeof p.sec === "number" && typeof p.pct === "number") {
+      return { sec: p.sec, pct: Math.max(0, Math.min(1, p.pct)) };
+    }
+    if (typeof p.sec === "number") return { sec: p.sec, pct: 0 };
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
   function EpubReader({ bookId, initialLocator, onProgress }, ref) {
-    const containerRef = useRef<HTMLDivElement>(null);
-    const viewRef = useRef<any>(null);
-    // Non-reactive ref so the relocate handler always reads the latest prop.
+    const containerRef = useRef<HTMLDivElement>(null); // scroll container
+    const bookRef = useRef<WholeBookHtml | null>(null);
     const onProgressRef = useRef(onProgress);
+    const [fontSize, setFontSize] = useState(18);
+    const [lineHeight, setLineHeight] = useState(8);
+    const [html, setHtml] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const lastPageReportRef = useRef(-1);
+
     useEffect(() => {
       onProgressRef.current = onProgress;
     }, [onProgress]);
 
+    // Build + mount the whole-book HTML.
     useEffect(() => {
       let cancelled = false;
       const container = containerRef.current;
-      if (!container) return;
-
-      let progressTimer: ReturnType<typeof setInterval> | null = null;
-      let onKeyDown: ((e: KeyboardEvent) => void) | null = null;
+      setLoading(true);
+      setError(null);
 
       (async () => {
-        // foliate-js is browser-only (custom elements, DOM). Import dynamically.
-        const { View, makeBook } = await import("foliate-js/view.js");
+        try {
+          const { makeBook } = await import("foliate-js/view.js");
 
-        // Register the custom element (safe to call multiple times).
-        const view = document.createElement("foliate-view") as any;
-        // foliate-view has no :host height rule of its own; its paginator uses
-        // height:100% which resolves to 0 unless the host has a definite height.
-        // Force block + full height so the paginator gets real dimensions and
-        // renders content instead of a blank viewport.
-        view.style.display = "block";
-        view.style.width = "100%";
-        view.style.height = "100%";
-        viewRef.current = view;
-        if (cancelled) return;
-        container.appendChild(view);
+          // Get a presigned GET URL, then fetch the book bytes directly from R2.
+          const metaRes = await fetch(`/api/book/${bookId}`);
+          if (!metaRes.ok) throw new Error(`book meta ${metaRes.status}`);
+          const meta = await metaRes.json();
+          const r2Res = await fetch(meta.url);
+          if (!r2Res.ok) throw new Error(`r2 ${r2Res.status}`);
+          const blob = await r2Res.blob();
+          const file = new File([blob], meta.fileName || "book.epub", {
+            type: "application/epub+zip",
+          });
 
-        // Get a presigned GET URL from the authenticated route, then fetch the
-        // book's bytes DIRECTLY from R2 (Railway can't proxy them).
-        const metaRes = await fetch(`/api/book/${bookId}`);
-        if (!metaRes.ok) {
-          console.error("[epub] /api/book fetch failed", metaRes.status);
-          return;
+          const book = await makeBook(file);
+          // Continuous scroll: build the whole book as one HTML flow.
+          const whole = await buildWholeBookHtml(book);
+          if (cancelled) return;
+          bookRef.current = whole;
+          if (container) container.dataset.done = "1";
+
+          setHtml(whole.html);
+          setLoading(false);
+        } catch (e) {
+          if (cancelled) return;
+          console.error("[epub] build failed", e);
+          setError(String((e as Error)?.message || e));
+          setLoading(false);
         }
-        const meta = await metaRes.json();
-        const r2Res = await fetch(meta.url);
-        if (!r2Res.ok) {
-          console.error("[epub] R2 fetch failed", r2Res.status);
-          return;
-        }
-        const blob = await r2Res.blob();
-        const file = new File([blob], meta.fileName || "book.epub", {
-          type: "application/epub+zip",
-        });
-
-        const book = await makeBook(file);
-        if (cancelled) return;
-        await view.open(book);
-        // Continuous scroll: put the paginator into "scrolled" flow so the
-        // EPUB reads as one long scrollable page (libra-style) instead of
-        // fixed column pages. This makes the book natively swipeable/scrollable
-        // on a phone — the reader no longer requires tapping edge zones to turn
-        // pages, and the scroll position is reconciled to `relocate` so the
-        // bottom-bar counter keeps advancing. CFI bookmarks still work.
-        view.renderer?.setAttribute?.("flow", "scrolled");
-        await view.init({
-          lastLocation: initialLocator || undefined,
-        });
-
-        // Apply dark theme once the renderer exists.
-        if (view.renderer?.setStyles) {
-          view.renderer.setStyles(DARK_CSS);
-        }
-
-        // --- Navigation wiring (fixes "only first page readable") -----------
-        // foliate paginator renders all content as hidden multi-column layout
-        // and only reveals one viewport at a time. Without an explicit way to
-        // call prev()/next() the reader is stuck on page 1. We expose
-        // next/prev on the handle and also bind keyboard + click/tap zones.
-
-        // Keyboard navigation (ignore when user is typing / focused on a button).
-        onKeyDown = (e: KeyboardEvent) => {
-          const t = e.target as HTMLElement | null;
-          if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-          switch (e.key) {
-            case "ArrowRight":
-            case "PageDown":
-              e.preventDefault();
-              view.next();
-              break;
-            case "ArrowLeft":
-            case "PageUp":
-              e.preventDefault();
-              view.prev();
-              break;
-            case " ":
-            case "ArrowDown":
-              e.preventDefault();
-              view.next();
-              break;
-            case "ArrowUp":
-              e.preventDefault();
-              view.prev();
-              break;
-          }
-        };
-        window.addEventListener("keydown", onKeyDown);
-
-        // Sync page counter into the parent (foliate relocate -> location).
-        const syncProgress = () => {
-          const loc = view?.lastLocation;
-          const tot = loc?.location?.total;
-          const cur = loc?.location?.current;
-          if (typeof cur === "number") onProgressRef.current?.(cur + 1, tot || 0);
-        };
-        // Listen to foliate's relocate events (fires on every page turn).
-        view.addEventListener("relocate", syncProgress);
-        // Warm initial sync + keep in sync while fonts settle.
-        syncProgress();
-        progressTimer = setInterval(() => {
-          if (!viewRef.current) return;
-          const l = viewRef.current.lastLocation;
-          if (l) {
-            const cur = l.location?.current;
-            const tot = l.location?.total;
-            onProgressRef.current?.(typeof cur === "number" ? cur + 1 : 1, tot || 0);
-          }
-        }, 500);
       })();
 
       return () => {
         cancelled = true;
-        if (progressTimer) clearInterval(progressTimer);
-        if (onKeyDown) window.removeEventListener("keydown", onKeyDown);
-        try {
-          viewRef.current?.close?.();
-        } catch {
-          /* ignore */
-        }
-        if (container) container.innerHTML = "";
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [bookId]);
+    }, [bookId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Report progress based on scroll position. One "page" = one viewport
+    // height of content over the whole flow; the total mirrors the section
+    // count scaled to lookups so the counter moves as you scroll.
+    const reportProgress = () => {
+      const container = containerRef.current;
+      const whole = bookRef.current;
+      if (!container || !whole) return;
+      const max = container.scrollHeight - container.clientHeight;
+      if (max <= 0) return;
+      const pct = container.scrollTop / max;
+      const page = Math.max(1, Math.round(pct * whole.sectionCount * 4));
+      if (page !== lastPageReportRef.current) {
+        lastPageReportRef.current = page;
+        onProgressRef.current?.(page, whole.sectionCount * 4);
+      }
+    };
+
+    // Keep the parent counter in sync on scroll (throttled).
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container) return;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onScroll = () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(reportProgress, 120);
+      };
+      container.addEventListener("scroll", onScroll, { passive: true });
+      return () => {
+        container.removeEventListener("scroll", onScroll);
+        if (timer) clearTimeout(timer);
+      };
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Keyboard navigation.
+    useEffect(() => {
+      const onKey = (e: KeyboardEvent) => {
+        const t = e.target as HTMLElement | null;
+        if (
+          t &&
+          (t.tagName === "INPUT" ||
+            t.tagName === "TEXTAREA" ||
+            t.isContentEditable)
+        )
+          return;
+        const c = containerRef.current;
+        if (!c) return;
+        const step = c.clientHeight * 0.9;
+        if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") {
+          if (e.key === " ") e.preventDefault();
+          c.scrollBy({ top: step, behavior: "smooth" });
+        } else if (e.key === "ArrowUp" || e.key === "PageUp") {
+          c.scrollBy({ top: -step, behavior: "smooth" });
+        }
+      };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }, []);
+
+    // Helper to scroll to a section + fraction within it.
+    const restoreTo = (container: HTMLElement, sec: number, pct: number) => {
+      const secEl = container.querySelector(`#sec-${sec}`);
+      if (!secEl) return;
+      const target = (secEl as HTMLElement).offsetTop +
+        (secEl as HTMLElement).offsetHeight * pct;
+      container.scrollTo({ top: target, behavior: "auto" });
+    };
 
     useImperativeHandle(
       ref,
-      (): EpubReaderHandle => ({
-        // foliate's lastLocation is an object; the `cfi` field is the
-        // persistent, serializable location string we save as the bookmark.
-        // Returning the whole object previously produced "[object Object]".
-        getLocator: () => {
-          const loc = viewRef.current?.lastLocation;
-          if (!loc) return null;
-          return typeof loc.cfi === "string" ? loc.cfi : null;
-        },
-        goTo: async (locator: string) => {
-          const view = viewRef.current;
-          if (!view) return;
-          try {
-            await view.goTo(locator);
-          } catch {
-            // Unresolvable locator → silently fall back (G10).
-          }
-        },
-        setTypography: (fontSize: number, lineHeight: number) => {
-          const view = viewRef.current;
-          if (!view?.renderer?.setStyles) return;
-          const css =
-            DARK_CSS +
-            ` html, body { font-size: ${fontSize}px !important; line-height: ${lineHeight} !important; }`;
-          view.renderer.setStyles(css);
-        },
-        next: async () => {
-          const view = viewRef.current;
-          if (!view) return;
-          try {
-            await view.next();
-          } catch {
-            /* ignore */
-          }
-        },
-        prev: async () => {
-          const view = viewRef.current;
-          if (!view) return;
-          try {
-            await view.prev();
-          } catch {
-            /* ignore */
-          }
-        },
-      }),
-      []
+      (): EpubReaderHandle => {
+        const container = () => containerRef.current;
+        return {
+          getLocator: () => {
+            const c = container();
+            const whole = bookRef.current;
+            if (!c || !whole) return null;
+            // Determine the current section (last section whose top is above the
+            // viewport top) and the fraction of it scrolled.
+            let cur = 0;
+            const vt = c.scrollTop;
+            for (let i = 0; i < whole.sectionCount; i++) {
+              const el = c.querySelector(`#sec-${i}`);
+              if (!el) break;
+              if ((el as HTMLElement).offsetTop <= vt + 50) cur = i;
+              else break;
+            }
+            const secEl = c.querySelector(`#sec-${cur}`);
+            const secHeight = secEl ? (secEl as HTMLElement).offsetHeight : 0;
+            const pct = secHeight > 0
+              ? Math.max(0, Math.min(1, (vt - (secEl ? (secEl as HTMLElement).offsetTop : 0)) / secHeight))
+              : 0;
+            return JSON.stringify({ sec: cur, pct });
+          },
+          goTo: async (locator: string) => {
+            const loc = parseEpubLocator(locator);
+            const c = container();
+            if (loc && c) restoreTo(c, loc.sec, loc.pct);
+          },
+          setTypography: (fs: number, lh: number) => {
+            setFontSize(fs);
+            setLineHeight(lh);
+          },
+          next: () => {
+            const c = container();
+            if (c) c.scrollBy({ top: c.clientHeight * 0.9, behavior: "smooth" });
+          },
+          prev: () => {
+            const c = container();
+            if (c) c.scrollBy({ top: -c.clientHeight * 0.9, behavior: "smooth" });
+          },
+          getToc: () => bookRef.current?.toc ?? [],
+          goToAnchor: (target: string) => {
+            const c = container();
+            if (!c) return;
+            const el = c.querySelector(target);
+            if (el) c.scrollTo({ top: (el as HTMLElement).offsetTop, behavior: "smooth" });
+          },
+        };
+      },
+      [],
     );
+
+    // Copy HTML into the container after it is prepared (keeps layout cheap),
+    // then restore the saved reading position the moment the DOM is mounted.
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container || !html) return;
+      container.innerHTML = html;
+      const loc = parseEpubLocator(initialLocator);
+      if (loc) {
+        const secEl = container.querySelector(`#sec-${loc.sec}`);
+        if (secEl) {
+          restoreTo(container, loc.sec, loc.pct);
+        } else if (loc.sec === 0) {
+          container.scrollTop = 0;
+        }
+      }
+    }, [html, initialLocator]);
 
     return (
       <div
         ref={containerRef}
-        className="bg-black cursor-default select-text"
-        style={{ position: "absolute", inset: 0 }}
-      />
+        className="epub-flow bg-black text-white select-text overflow-y-auto w-full h-full px-4 sm:px-8 py-6 sm:py-10"
+        style={{
+          fontSize: `${fontSize}px`,
+          lineHeight: `${lineHeight}`,
+        }}
+        data-whole-epub
+      >
+        {loading && !html && (
+          <div className="flex items-center justify-center h-full">
+            <div className="w-6 h-6 border-2 border-white/30 border-t-white/80 rounded-full animate-spin" />
+          </div>
+        )}
+        {error && (
+          <div className="p-6 text-sm text-red-400">
+            Failed to open the book: {error}
+          </div>
+        )}
+      </div>
     );
-  }
+  },
 );
 
 export default EpubReader;

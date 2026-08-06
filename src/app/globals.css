@@ -31,6 +31,101 @@ body {
   line-height: inherit !important;
 }
 
+/* Whole-book EPUB continuous flow: the entire book is rendered as one
+   scrollable <div class="epub-flow"> (replacing foliate's paged iframe).
+   Typography (font-size/line-height) is driven by the component's inline
+   style; these rules give the extracted HTML a clean, legible prose look. */
+.epub-flow {
+  max-width: 46rem;
+  margin: 0 auto;
+}
+.epub-flow .epub-section {
+  margin-bottom: 2.5rem;
+}
+.epub-flow h1,
+.epub-flow h2,
+.epub-flow h3,
+.epub-flow h4,
+.epub-flow h5,
+.epub-flow h6 {
+  color: #ffffff;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.5em 0 0.5em;
+}
+.epub-flow h1 {
+  font-size: 1.6em;
+}
+.epub-flow h2 {
+  font-size: 1.35em;
+}
+.epub-flow h3 {
+  font-size: 1.15em;
+}
+.epub-flow p {
+  margin: 0 0 1em;
+}
+.epub-flow a {
+  color: #6cb6ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.epub-flow img {
+  max-width: 100%;
+  height: auto;
+  margin: 1em auto;
+  display: block;
+  filter: invert(1) hue-rotate(180deg);
+}
+.epub-flow svg {
+  filter: invert(1) hue-rotate(180deg);
+}
+.epub-flow ul,
+.epub-flow ol {
+  margin: 0 0 1em;
+  padding-left: 1.5em;
+}
+.epub-flow li {
+  margin: 0.35em 0;
+}
+.epub-flow blockquote {
+  border-left: 3px solid currentColor;
+  opacity: 0.85;
+  padding-left: 1em;
+  margin: 0 0 1em;
+}
+.epub-flow table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 1em;
+  overflow-x: auto;
+}
+.epub-flow th,
+.epub-flow td {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 0.5em 0.6em;
+  text-align: left;
+}
+.epub-flow code,
+.epub-flow pre {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.epub-flow code {
+  padding: 0.1em 0.3em;
+}
+.epub-flow pre {
+  padding: 0.8em;
+  overflow-x: auto;
+  margin: 0 0 1em;
+}
+.epub-flow hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  margin: 2em 0;
+}
+
 /* Range inputs: touch-friendly tap target. */
 input[type="range"] {
   min-height: 44px;
