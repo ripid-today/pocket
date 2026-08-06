@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { useToast } from "@/components/ToastProvider";
 import EpubReader, { type EpubReaderHandle } from "./EpubReader";
 import PdfReader, { type PdfReaderHandle, type PdfReaderMode } from "./PdfReader";
 import ReaderTopBar from "./ReaderTopBar";
@@ -27,6 +28,8 @@ export default function ReaderShell({
   const router = useRouter();
   const epubRef = useRef<EpubReaderHandle>(null);
   const pdfRef = useRef<PdfReaderHandle>(null);
+  const { showToast } = useToast();
+  const saveInFlightRef = useRef(false);
 
   const [fontSize, setFontSize] = useState(prefs.fontSize);
   const [lineHeight, setLineHeight] = useState(prefs.lineHeight);
@@ -140,28 +143,47 @@ export default function ReaderShell({
   }, []);
 
   const handleSaveSpot = useCallback(async () => {
-    let locator: string;
-    if (format === "epub") {
-      locator = epubRef.current?.getLocator() ?? "start";
-    } else {
-      const page = pdfRef.current?.getPage() ?? 1;
-      const scrollPct = pdfRef.current?.getScrollPct() ?? 0;
-      locator = JSON.stringify({
-        page,
-        scrollPct,
-        mode: pdfMode === "reflow" ? "reflow" : undefined,
-      });
-    }
+    // Ignore rapid repeated clicks while a save is in flight.
+    if (saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
     try {
-      await fetch("/api/bookmark", {
+      let locator: string | null;
+      if (format === "epub") {
+        locator = epubRef.current?.getLocator() ?? null;
+      } else {
+        const page = pdfRef.current?.getPage() ?? 1;
+        const scrollPct = pdfRef.current?.getScrollPct() ?? 0;
+        locator = JSON.stringify({
+          page,
+          scrollPct,
+          mode: pdfMode === "reflow" ? "reflow" : undefined,
+        });
+      }
+
+      if (!locator) {
+        // Reader not ready or no position yet — don't pretend we saved.
+        showToast("Nothing to save yet", "info");
+        return;
+      }
+
+      const res = await fetch("/api/bookmark", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bookId, locator }),
       });
-    } catch {
-      // best-effort; minimal handling
+      if (res.ok) {
+        showToast("Spot saved", "success");
+      } else {
+        console.error("[saveSpot] non-ok", res.status);
+        showToast("Couldn’t save spot", "error");
+      }
+    } catch (e) {
+      console.error("[saveSpot]", e);
+      showToast("Couldn’t save spot", "error");
+    } finally {
+      saveInFlightRef.current = false;
     }
-  }, [bookId, format, pdfMode]);
+  }, [bookId, format, pdfMode, showToast]);
 
   const handleClose = useCallback(() => router.push("/library"), [router]);
 
