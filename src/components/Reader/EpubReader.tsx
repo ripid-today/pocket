@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { buildWholeBookHtml, type WholeBookHtml } from "@/lib/epubWhole";
+import { fetchBookBytes } from "@/lib/fetchBookBytes";
 
 export interface EpubReaderHandle {
   // Returns the current save-spot locator (a JSON string with section + %
@@ -80,14 +81,11 @@ const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(
         try {
           const { makeBook } = await import("foliate-js/view.js");
 
-          // Get a presigned GET URL, then fetch the book bytes directly from R2.
-          const metaRes = await fetch(`/api/book/${bookId}`);
-          if (!metaRes.ok) throw new Error(`book meta ${metaRes.status}`);
-          const meta = await metaRes.json();
-          const r2Res = await fetch(meta.url);
-          if (!r2Res.ok) throw new Error(`r2 ${r2Res.status}`);
-          const blob = await r2Res.blob();
-          const file = new File([blob], meta.fileName || "book.epub", {
+          // Get the presigned GET URL, then fetch the book bytes directly from
+          // R2 with automatic re-sign+retry on expiry/network failure and a
+          // clear error message on storage denial.
+          const { blob, fileName } = await fetchBookBytes(bookId);
+          const file = new File([blob], fileName || "book.epub", {
             type: "application/epub+zip",
           });
 

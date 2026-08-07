@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useImperativeHandle, forwardRef, useState } from "react";
+import { fetchBookBytes } from "@/lib/fetchBookBytes";
 
 // pdf.js is browser-only. Import dynamically so SSR/build doesn't try to run it.
 // The worker is loaded from a CDN matched to the installed pdfjs-dist version.
@@ -56,12 +57,16 @@ const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function PdfReader
       const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
       pdfjs.GlobalWorkerOptions.workerSrc = WORKER_SRC;
 
-      const metaRes = await fetch(`/api/book/${bookId}`);
-      if (!metaRes.ok) return;
-      const meta = await metaRes.json();
-      const r2Res = await fetch(meta.url);
-      if (!r2Res.ok) return;
-      const data = new Uint8Array(await r2Res.arrayBuffer());
+      // Fetch the PDF bytes directly from R2 (re-sign+retry + clear errors).
+      let data;
+      try {
+        const { blob } = await fetchBookBytes(bookId);
+        data = new Uint8Array(await blob.arrayBuffer());
+      } catch (e) {
+        if (cancelled) return;
+        console.error("[pdf] load failed", e);
+        return;
+      }
       const task = pdfjs.getDocument({ data });
       const pdf = await task.promise;
       if (cancelled) return;
