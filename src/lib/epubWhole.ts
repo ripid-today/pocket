@@ -47,6 +47,50 @@ function resolveURL(url: string, relativeTo: string): string {
   }
 }
 
+// Resolve a resource reference (e.g. an <img src> or <math altimg>) to the
+// exact href form foliate uses as keys in its manifest. foliate normalizes every
+// manifest item href against the OPF path using a virtual `file:////base/` root,
+// so its `resources.resolveHref(ref)` produces the same key we can look up in
+// itemByHref / hand to book.loadBlob(). Fall back to plain relative resolution
+// when that isn't available. Protocol/data URIs pass through unchanged.
+function resolveBookRef(ref: string, href: string, book: any): string {
+  if (/^(https?:|data:|blob:|mailto:|tel:|cid:)/i.test(ref)) return ref;
+  try {
+    const fr = book?.resources?.resolveHref?.(ref);
+    if (typeof fr === "string" && fr) return fr;
+  } catch {
+    /* fall through */
+  }
+  return resolveURL(ref, href);
+}
+
+// Find the manifest item for a resolved resource href. Tries, in order:
+//  1. exact match against itemByHref
+//  2. suffix match against the same map (handles a leading base prefix)
+//  3. a unique bare-filename match (books often reference by basename)
+// Returns the foliate manifest item (whose .href book.loadBlob accepts) or null.
+function findManifestItem(
+  resolved: string,
+  itemByHref: Map<string, any>,
+  manifest: any[],
+): any | null {
+  if (!resolved) return null;
+  const exact = itemByHref.get(resolved);
+  if (exact) return exact;
+  // Try a unique bare-filename match (books often reference by basename).
+  const baseName = String(resolved).split("/").pop();
+  let uniqueByBase = null;
+  for (const m of manifest) {
+    const mh = String(m.href);
+    if (mh === resolved) return m;
+    if (baseName && mh.endsWith("/" + baseName)) {
+      if (uniqueByBase) { uniqueByBase = null; break; } // ambiguous basename
+      uniqueByBase = m;
+    }
+  }
+  return uniqueByBase;
+}
+
 // Rewrite an href to an in-document anchor given the section index where the
 // link originates and the target resolution.
 function rewriteHref(
@@ -185,9 +229,8 @@ export async function buildWholeBookHtml(book: any): Promise<WholeBookHtml> {
         const src = img.getAttribute("src") || img.getAttribute("xlink:href") || img.getAttribute("href");
         if (!src) continue;
         if (/^data:/i.test(src)) continue;
-        const resolved = resolveURL(src, href);
-        const matched = itemByHref.get(resolved) ||
-          manifest.find((m) => String(m.href) === resolved);
+        const resolved = resolveBookRef(src, href, book);
+        const matched = findManifestItem(resolved, itemByHref, manifest);
         if (!matched) {
           img.remove();
           continue;
@@ -200,6 +243,53 @@ export async function buildWholeBookHtml(book: any): Promise<WholeBookHtml> {
           img.removeAttribute("href");
         } catch {
           img.remove();
+        }
+      }
+
+      // Render equation bitmaps. Many textbooks encode formulas as MathML that
+      // ALSO carries a bitmap fallback in the `altimg` attribute (and sometimes
+      // a cached copy in `data-uri`). Chromium only implements MathML Core, so
+      // complex formulas (fractions <mfrac>, sub/superscripts <msub/msup>, and
+      // accents <mover>) cannot be laid out and get painted as missing-glyph
+      // "OBJ" boxes. This book has zero standalone <img> figures — the ONLY
+      // graphics are these MathML altimg bitmaps, which the img/image handler
+      // above never sees (they are attributes, not <img> children).
+      //
+      // Fix: when a <math> element has a resolvable altimg (or data-uri)
+      // bitmap, load it, inline it as a data:image, and REPLACE the <math>
+      // element with an <img> so the publisher's own equation image displays
+      // instead of the OBJ box. If the bitmap can't be resolved or loaded, we
+      // LEAVE the MathML untouched (no worse than today) and log a warning.
+      const mathEls = Array.from(frag.querySelectorAll("math"));
+      for (const mathEl of mathEls) {
+        const altImg = mathEl.getAttribute("altimg");
+        const dataUriSrc = mathEl.getAttribute("data-uri");
+        let ref = altImg || dataUriSrc || "";
+        // Prefer a real bitmap over an empty data-uri bookkeeping field.
+        if (!ref && dataUriSrc) ref = dataUriSrc;
+        if (!ref) continue;
+
+        const resolved = resolveBookRef(ref, href, book);
+        // Already a data/remote URI directly (no manifest lookup needed).
+        if (/^data:/i.test(resolved)) {
+          replaceMathWithImg(mathEl, resolved);
+          continue;
+        }
+        const matched = findManifestItem(resolved, itemByHref, manifest);
+        if (!matched) {
+          parserWarnings.push(
+            `[math altimg] no manifest item for ${resolved} (kept MathML)`
+          );
+          continue;
+        }
+        try {
+          const blob = await book.loadBlob(matched.href);
+          const dataUri = await blobToDataUrl(blob);
+          replaceMathWithImg(mathEl, dataUri);
+        } catch (e) {
+          parserWarnings.push(
+            `[math altimg] load failed for ${resolved} (kept MathML): ${String(e && (e as Error).message || e)}`
+          );
         }
       }
 
@@ -226,7 +316,17 @@ export async function buildWholeBookHtml(book: any): Promise<WholeBookHtml> {
   }
 
   if (parserWarnings.length) {
-    console.warn("[epubWhole] section parse warnings:", parserWarnings);
+    // Cap output so a book with many unresolved math altimg refs doesn't flood
+    // the console. Always log the total count (useful for diagnosing losses).
+    const shownAlt = parserWarnings.filter((w) => w.startsWith("[math altimg]")).length;
+    const capped =
+      parserWarnings.length > 20
+        ? parserWarnings.slice(0, 20).concat(`...and ${parserWarnings.length - 20} more`)
+        : parserWarnings;
+    console.warn(
+      `[epubWhole] ${parserWarnings.length} warning(s) (${shownAlt} math-altimg), e.g.:`,
+      capped
+    );
   }
 
   return { html, toc: mappedToc, sectionCount: ordered.length };
@@ -243,4 +343,32 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
   const base64 = typeof btoa === "function" ? btoa(binary) : "";
   const mime = (blob.type || "image/png").split(";")[0];
   return `data:${mime};base64,${base64}`;
+}
+
+// Replace a <math> element with an <img> rendering the equation's bitmap
+// fallback. Honors the publisher's altimg-width / altimg-height (CSS px), and
+// keeps the surrounding layout intact by swapping the node in place.
+function replaceMathWithImg(mathEl: Element, dataUri: string): void {
+  const img = mathEl.ownerDocument.createElement("img");
+  img.setAttribute("src", dataUri);
+  img.setAttribute("alt", "equation");
+  img.setAttribute("loading", "lazy");
+  img.setAttribute("decoding", "async");
+
+  const w = mathEl.getAttribute("altimg-width");
+  const h = mathEl.getAttribute("altimg-height");
+  // altimg-* dimensions come in CSS px. Set them as style so width/height
+  // attributes (which some books use as layout hints) don't win out.
+  const dims: string[] = [];
+  if (w) { img.setAttribute("width", w); dims.push(`width: ${w}px`); }
+  if (h) { img.setAttribute("height", h); dims.push(`height: ${h}px`); }
+  if (dims.length) img.setAttribute("style", dims.join("; "));
+  // Preserve inline/block intent: a block equation should sit on its own
+  // line, an inline one should stay in the text flow.
+  const display = mathEl.getAttribute("display");
+  if (display !== "inline") img.setAttribute("style", `${img.getAttribute("style") || ""}; display: block; margin: 0.5rem 0;`.replace(/^; /, ""));
+
+  // Copy ids so in-document anchors / TOC links to this equation keep working.
+  if (mathEl.id) img.id = mathEl.id;
+  mathEl.replaceWith(img);
 }
