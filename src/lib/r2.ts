@@ -29,6 +29,12 @@ function client(): S3Client {
       requestTimeout: 30_000,
       connectionTimeout: 20_000,
     } as never,
+    // Don't auto-add a zero CRC32 checksum to presigned PUT/GET URLs. The SDK's
+    // default requestChecksumCalculation="WHEN_SUPPORTED" bakes a bogus
+    // `x-amz-checksum-crc32=AAAAAA==` (and x-amz-sdk-checksum-algorithm=CRC32)
+    // into signed URLs because there is no payload at signing time. Harmless but
+    // confusing; WHEN_REQUIRED omits it (R2 accepts unsigned checksums).
+    requestChecksumCalculation: "WHEN_REQUIRED",
     credentials: {
       accessKeyId: process.env.R2_ACCESS_KEY_ID,
       secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
